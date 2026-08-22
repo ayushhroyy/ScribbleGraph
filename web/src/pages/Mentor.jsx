@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import Nav from "../components/Nav.jsx";
-import { api } from "../lib.js";
+import { api, blip } from "../lib.js";
+import { enrollFromBlobs, isWakeWord, saveWake, loadWake } from "../wake.js";
 
 /* ------------------------------------------------------------------ */
 /* voice engine: MediaRecorder + AnalyserNode silence detection        */
@@ -132,6 +133,8 @@ export default function Mentor() {
   const [voiceOn, setVoiceOn] = useState(true);
   const [wakeMode, setWakeMode] = useState(false);
   const [armed, setArmed] = useState(false); // wake word said, awaiting question
+  const [wakeData, setWakeData] = useState(null); // enrolled on-device templates
+  const [enrollStep, setEnrollStep] = useState(0); // 0 = off, 1..3 = teaching samples
   const [text, setText] = useState("");
   const [panel, setPanel] = useState(null); // notes | quiz | cards
   const [interim, setInterim] = useState("");
@@ -145,7 +148,13 @@ export default function Mentor() {
   const startListeningRef = useRef(null);
   const wakeRef = useRef(false);
   const armedRef = useRef(false);
+  const wakeDataRef = useRef(null);
+  const enrollStepRef = useRef(0);
+  const enrollBlobsRef = useRef([]);
   useEffect(() => { autoListenRef.current = autoListen; }, [autoListen]);
+  useEffect(() => { wakeDataRef.current = wakeData; }, [wakeData]);
+  useEffect(() => { enrollStepRef.current = enrollStep; }, [enrollStep]);
+  useEffect(() => { setWakeData(loadWake()); }, []);
 
   /* call timer */
   useEffect(() => {
@@ -214,14 +223,40 @@ export default function Mentor() {
     }
   }, [chatId, speak]);
 
+  const restartHot = useCallback(() => {
+    setPhase(HOT);
+    startListeningRef.current?.(true);
+  }, []);
+
   const handleUtterance = useCallback(async (blob, direct) => {
     const idlePhase = wakeRef.current ? HOT : IDLE;
     if (!blob || blob.size < 3000) {
       setInterim("");
-      setPhase(idlePhase);
-      if (wakeRef.current) startListeningRef.current?.(true);
+      if (wakeRef.current && !direct) restartHot();
+      else setPhase(idlePhase);
       return;
     }
+
+    /* ---- on-device wake gate: costs zero API calls ----
+       Utterances are matched against local "Scribble" templates and only
+       sent to STT if the wake word is heard (or audio can't be decoded). */
+    let localHit = false, localUndecoded = false;
+    if (!direct && wakeRef.current && !armedRef.current && wakeDataRef.current) {
+      let r;
+      try { r = await isWakeWord(blob, wakeDataRef.current); }
+      catch { r = { hit: false, undecoded: true, dur: 0 }; }
+      localHit = r.hit;
+      localUndecoded = !!r.undecoded;
+      if (!localHit && !localUndecoded) return restartHot(); // not the word — audio never leaves the device
+      if (localHit && r.dur <= 1.6) {
+        // bare "Scribble" → arm; next utterance is the question
+        armedRef.current = true;
+        setArmed(true);
+        return restartHot();
+      }
+      // wake + question in one breath (dur > 1.6), or undecodable → STT below
+    }
+
     setPhase(THINKING);
     setInterim("…");
     try {
@@ -230,30 +265,20 @@ export default function Mentor() {
       const { text: said } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
       if (!said) {
         setInterim("");
-        setPhase(idlePhase);
-        if (wakeRef.current) startListeningRef.current?.(true);
+        if (wakeRef.current && !direct) restartHot();
+        else setPhase(idlePhase);
         return;
       }
       setInterim(said);
 
-      // wake gate: utterances must contain "scribble" unless already armed or manual
       if (!direct && wakeRef.current && !armedRef.current) {
         const { word, question } = parseWake(said);
-        if (!word) {
-          setPhase(HOT);
-          startListeningRef.current?.(true); // not the wake word — back to hot mic
-          return;
-        }
-        if (question.split(/\s+/).length >= 2) {
-          askMentor(question); // "Scribble, how do buffers work?"
-          return;
-        }
-        // just the wake word — arm and grab the next utterance as the question
+        if (!word && !localHit) return restartHot(); // STT agrees: no wake word
+        if (word && question.split(/\s+/).length >= 2) return void askMentor(question);
+        if (!word && localHit) return void askMentor(said); // local heard it, ASR mangled the word
         armedRef.current = true;
         setArmed(true);
-        setPhase(HOT);
-        startListeningRef.current?.(true);
-        return;
+        return restartHot();
       }
 
       armedRef.current = false;
@@ -262,13 +287,13 @@ export default function Mentor() {
     } catch {
       setInterim("");
       setError("Couldn't hear that — try again.");
-      setPhase(idlePhase);
-      if (wakeRef.current) startListeningRef.current?.(true);
+      if (wakeRef.current && !direct) restartHot();
+      else setPhase(idlePhase);
     }
-  }, [askMentor]);
+  }, [askMentor, restartHot]);
 
   const startListening = useCallback(async (fromAuto = false) => {
-    if (busyRef.current || engineRef.current) return;
+    if (busyRef.current || engineRef.current || enrollStepRef.current) return;
     setError(null);
     try {
       const eng = new VoiceEngine({
@@ -304,20 +329,92 @@ export default function Mentor() {
     handleUtterance(blob, true); // manual capture always bypasses the wake gate
   };
 
+  /* ---- wake word enrollment (on-device templates) ---- */
+
+  async function captureEnrollSample() {
+    if (busyRef.current || engineRef.current) return;
+    try {
+      const eng = new VoiceEngine({
+        onLevel: (l) => setLevel(l),
+        onSpeech: () => setPhase(RECORDING),
+        onSilenceEnd: async () => {
+          const blob = await eng.stop();
+          engineRef.current = null;
+          setLevel(0);
+          if (!enrollStepRef.current) return; // cancelled
+          if (!blob || blob.size < 2500) return captureEnrollSample(); // too quiet, retry sample
+          blip();
+          enrollBlobsRef.current.push(blob);
+          if (enrollBlobsRef.current.length >= 3) return void finishEnrollment();
+          setEnrollStep(enrollBlobsRef.current.length + 1);
+          captureEnrollSample();
+        },
+      });
+      engineRef.current = eng;
+      setPhase(RECORDING);
+      await eng.start();
+    } catch (e) {
+      setError(e?.message ?? "Mic unavailable for setup");
+      cancelEnrollment();
+    }
+  }
+
+  async function finishEnrollment() {
+    setEnrollStep(0);
+    setPhase(THINKING);
+    const data = await enrollFromBlobs(enrollBlobsRef.current);
+    if (!data) {
+      setError("Couldn't analyze those samples — try setup again.");
+      setPhase(IDLE);
+      return;
+    }
+    saveWake(data);
+    setWakeData(data);
+    blip(1200);
+    setWakeMode(true);
+    wakeRef.current = true;
+    setInterim("");
+    startListening(true);
+  }
+
+  function startEnrollment() {
+    engineRef.current?.stop();
+    engineRef.current = null;
+    setLevel(0);
+    enrollBlobsRef.current = [];
+    setEnrollStep(1);
+    captureEnrollSample();
+  }
+
+  function cancelEnrollment() {
+    setEnrollStep(0);
+    engineRef.current?.stop();
+    engineRef.current = null;
+    setLevel(0);
+    if (wakeMode) startListening(true);
+    else setPhase(IDLE);
+  }
+
   function toggleWake() {
-    const next = !wakeMode;
-    setWakeMode(next);
-    wakeRef.current = next;
-    armedRef.current = false;
-    setArmed(false);
-    if (!callLive) return;
-    if (next) {
-      startListening(true);
-    } else {
+    if (enrollStep) return cancelEnrollment();
+    if (wakeMode) {
+      // off
+      setWakeMode(false);
+      wakeRef.current = false;
+      armedRef.current = false;
+      setArmed(false);
       engineRef.current?.stop();
       engineRef.current = null;
       setLevel(0);
       setPhase(IDLE);
+      return;
+    }
+    if (wakeData) {
+      setWakeMode(true);
+      wakeRef.current = true;
+      if (callLive) startListening(true);
+    } else {
+      startEnrollment(); // first use → teach the word
     }
   }
 
@@ -357,12 +454,20 @@ export default function Mentor() {
                 <Orb phase={phase} level={level} />
                 <div className="pill mono text-white/70">{mmss}</div>
                 <div className="text-[13px] text-zinc-400 h-5">
-                  {phase === HOT && (armed ? "Listening — ask your question" : 'Say "Scribble" to ask')}
-                  {phase === RECORDING && (wakeMode && !armed ? 'Heard you — keep going…' : "Listening — talk, then I auto-send on pause")}
-                  {phase === THINKING && (interim && interim !== "…" ? `“${interim}”` : "Thinking…")}
-                  {phase === SPEAKING && "Speaking…"}
-                  {phase === IDLE && (wakeMode ? 'Say "Scribble" to ask' : autoListen ? "Ready — say something" : "Tap the mic")}
+                  {enrollStep ? `Say "Scribble" — sample ${Math.min(enrollBlobsRef.current.length + 1, 3)}/3`
+                  : phase === HOT ? (armed ? "Listening — ask your question" : 'Say "Scribble" (checked on-device)')
+                  : phase === RECORDING ? (wakeMode && !armed ? "Heard something… checking" : "Listening — talk, then I auto-send on pause")
+                  : phase === THINKING ? (interim && interim !== "…" ? `“${interim}”` : "Thinking…")
+                  : phase === SPEAKING ? "Speaking…"
+                  : wakeMode ? 'Say "Scribble" to ask'
+                  : autoListen ? "Ready — say something"
+                  : "Tap the mic"}
                 </div>
+                {enrollStep > 0 && (
+                  <button onClick={cancelEnrollment} className="text-[11px] text-zinc-500 hover:text-white underline underline-offset-2">
+                    cancel setup
+                  </button>
+                )}
                 {error && <div className="text-[12px] text-[#fca5a5]">{error}</div>}
               </div>
 
@@ -432,12 +537,20 @@ export default function Mentor() {
                     <div className="flex items-center gap-3">
                       <button
                         onClick={toggleWake}
-                        className={`pill !text-[10.5px] transition-colors ${wakeMode ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
-                        title='Wake word: say "Scribble" to ask'
+                        className={`pill !text-[10.5px] transition-colors ${
+                          enrollStep ? "!border-[#FBBF24]/60 text-[#FBBF24]" :
+                          wakeMode ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400 hover:text-zinc-200"
+                        }`}
+                        title='Wake word "Scribble" — matched on-device, audio only sent after it is heard'
                       >
-                        <span className={`w-1.5 h-1.5 rounded-full ${wakeMode ? "bg-[#7c6cff] animate-pulse" : "bg-zinc-600"}`} />
-                        wake "Scribble"
+                        <span className={`w-1.5 h-1.5 rounded-full ${wakeMode ? "bg-[#7c6cff] animate-pulse" : enrollStep ? "bg-[#FBBF24]" : "bg-zinc-600"}`} />
+                        {enrollStep ? "teaching…" : wakeData ? 'wake "Scribble"' : 'set up "Scribble"'}
                       </button>
+                      {wakeMode && wakeData && !enrollStep && (
+                        <button onClick={startEnrollment} className="text-[10.5px] text-zinc-600 hover:text-zinc-300">
+                          re-learn
+                        </button>
+                      )}
                       {!wakeMode && (
                         <label className="flex items-center gap-2 text-[11.5px] text-zinc-500 cursor-pointer select-none">
                           <input type="checkbox" checked={autoListen} onChange={(e) => setAutoListen(e.target.checked)} className="accent-[#7c6cff]" />
