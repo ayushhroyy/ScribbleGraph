@@ -17,7 +17,8 @@ function pickMime() {
 class VoiceEngine {
   constructor({ onSilenceEnd, onLevel } = {}) {
     this.onSilenceEnd = onSilenceEnd;
-    this.onLevel = onLevel;
+      this.onLevel = onLevel;
+      this.onSpeech = onSpeech;
     this.stream = null;
     this.ctx = null;
     this.analyser = null;
@@ -62,6 +63,7 @@ class VoiceEngine {
       this.onLevel?.(level);
       const now = performance.now();
       if (level > THRESH) {
+        if (!this.spoke) this.onSpeech?.();
         this.lastLoud = now;
         this.spoke = true;
       } else if (this.spoke && now - this.lastLoud > 1400) {
@@ -93,7 +95,31 @@ class VoiceEngine {
 
 /* ------------------------------------------------------------------ */
 
-const IDLE = "idle", THINKING = "thinking", SPEAKING = "speaking", RECORDING = "recording";
+const IDLE = "idle", THINKING = "thinking", SPEAKING = "speaking", RECORDING = "recording", HOT = "hot";
+
+/* ---- wake word: fuzzy "scribble" match + question extraction ---- */
+function lev(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 3) return 9;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 1; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[m][n];
+}
+
+function parseWake(text) {
+  const words = text.toLowerCase().replace(/[^a-z\s']/g, "").split(/\s+/).filter(Boolean);
+  let at = -1;
+  for (let i = 0; i < Math.min(words.length, 4); i++) {
+    if (lev(words[i], "scribble") <= 2 || lev(words[i], "scribbles") <= 2 || lev(words[i], "skribbl") <= 2) { at = i; break; }
+  }
+  if (at === -1) return { word: null, question: "" };
+  let rest = words.slice(at + 1);
+  while (rest.length && /^(hey|ok|okay|hi|yo|please|can|you|could|would)$/.test(rest[0])) rest.shift();
+  return { word: words[at], question: rest.join(" ").trim() };
+}
 
 export default function Mentor() {
   const [phase, setPhase] = useState(IDLE); // call orb state
@@ -104,6 +130,8 @@ export default function Mentor() {
   const [level, setLevel] = useState(0);
   const [autoListen, setAutoListen] = useState(true);
   const [voiceOn, setVoiceOn] = useState(true);
+  const [wakeMode, setWakeMode] = useState(false);
+  const [armed, setArmed] = useState(false); // wake word said, awaiting question
   const [text, setText] = useState("");
   const [panel, setPanel] = useState(null); // notes | quiz | cards
   const [interim, setInterim] = useState("");
@@ -115,6 +143,8 @@ export default function Mentor() {
   const endRef = useRef(null);
   const autoListenRef = useRef(autoListen);
   const startListeningRef = useRef(null);
+  const wakeRef = useRef(false);
+  const armedRef = useRef(false);
   useEffect(() => { autoListenRef.current = autoListen; }, [autoListen]);
 
   /* call timer */
@@ -132,10 +162,14 @@ export default function Mentor() {
 
   /* ---------------- voice turn ---------------- */
 
+  const resumeAfterAnswer = () => {
+    if (wakeRef.current || autoListenRef.current) startListeningRef.current?.(true);
+    else setPhase(IDLE);
+  };
+
   const speak = useCallback(async (answerText) => {
     if (!voiceOn) {
-      if (autoListenRef.current) startListeningRef.current?.(true);
-      else setPhase(IDLE);
+      resumeAfterAnswer();
       return;
     }
     try {
@@ -153,8 +187,7 @@ export default function Mentor() {
       audioRef.current = a;
       a.onended = () => {
         URL.revokeObjectURL(url);
-        if (autoListenRef.current) startListening(true);
-        else setPhase(IDLE);
+        resumeAfterAnswer();
       };
       await a.play();
     } catch {
@@ -181,45 +214,82 @@ export default function Mentor() {
     }
   }, [chatId, speak]);
 
+  const handleUtterance = useCallback(async (blob, direct) => {
+    const idlePhase = wakeRef.current ? HOT : IDLE;
+    if (!blob || blob.size < 3000) {
+      setInterim("");
+      setPhase(idlePhase);
+      if (wakeRef.current) startListeningRef.current?.(true);
+      return;
+    }
+    setPhase(THINKING);
+    setInterim("…");
+    try {
+      const fd = new FormData();
+      fd.append("audio", blob, "q.webm");
+      const { text: said } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
+      if (!said) {
+        setInterim("");
+        setPhase(idlePhase);
+        if (wakeRef.current) startListeningRef.current?.(true);
+        return;
+      }
+      setInterim(said);
+
+      // wake gate: utterances must contain "scribble" unless already armed or manual
+      if (!direct && wakeRef.current && !armedRef.current) {
+        const { word, question } = parseWake(said);
+        if (!word) {
+          setPhase(HOT);
+          startListeningRef.current?.(true); // not the wake word — back to hot mic
+          return;
+        }
+        if (question.split(/\s+/).length >= 2) {
+          askMentor(question); // "Scribble, how do buffers work?"
+          return;
+        }
+        // just the wake word — arm and grab the next utterance as the question
+        armedRef.current = true;
+        setArmed(true);
+        setPhase(HOT);
+        startListeningRef.current?.(true);
+        return;
+      }
+
+      armedRef.current = false;
+      setArmed(false);
+      askMentor(said);
+    } catch {
+      setInterim("");
+      setError("Couldn't hear that — try again.");
+      setPhase(idlePhase);
+      if (wakeRef.current) startListeningRef.current?.(true);
+    }
+  }, [askMentor]);
+
   const startListening = useCallback(async (fromAuto = false) => {
     if (busyRef.current || engineRef.current) return;
     setError(null);
     try {
       const eng = new VoiceEngine({
         onLevel: (l) => setLevel(l),
+        onSpeech: () => setPhase(RECORDING),
         onSilenceEnd: async () => {
           const blob = await eng.stop();
           engineRef.current = null;
           setLevel(0);
-          if (!blob || blob.size < 3000) {
-            setPhase(IDLE);
-            return;
-          }
-          setPhase(THINKING);
-          setInterim("…");
-          try {
-            const fd = new FormData();
-            fd.append("audio", blob, "q.webm");
-            const { text: said } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
-            if (!said) { setInterim(""); setPhase(IDLE); return; }
-            setInterim(said);
-            askMentor(said);
-          } catch {
-            setInterim("");
-            setError("Couldn't hear that — try again.");
-            setPhase(IDLE);
-          }
+          handleUtterance(blob, false);
         },
       });
       engineRef.current = eng;
-      setPhase(RECORDING);
+      setPhase(fromAuto && wakeRef.current ? HOT : RECORDING);
       await eng.start();
     } catch (e) {
       engineRef.current = null;
       setError(e?.message ?? "Mic unavailable — use text or check permissions.");
       setPhase(IDLE);
     }
-  }, [askMentor]);
+  }, [handleUtterance]);
 
   startListeningRef.current = startListening;
 
@@ -229,22 +299,27 @@ export default function Mentor() {
     const blob = await eng.stop();
     engineRef.current = null;
     setLevel(0);
-    if (!blob || blob.size < 2000) { setPhase(IDLE); return; }
-    setPhase(THINKING);
-    setInterim("…");
-    try {
-      const fd = new FormData();
-      fd.append("audio", blob, "q.webm");
-      const { text: said } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
-      if (!said) { setInterim(""); setPhase(IDLE); return; }
-      setInterim(said);
-      askMentor(said);
-    } catch {
-      setInterim("");
-      setError("Couldn't hear that — try again.");
+    armedRef.current = false;
+    setArmed(false);
+    handleUtterance(blob, true); // manual capture always bypasses the wake gate
+  };
+
+  function toggleWake() {
+    const next = !wakeMode;
+    setWakeMode(next);
+    wakeRef.current = next;
+    armedRef.current = false;
+    setArmed(false);
+    if (!callLive) return;
+    if (next) {
+      startListening(true);
+    } else {
+      engineRef.current?.stop();
+      engineRef.current = null;
+      setLevel(0);
       setPhase(IDLE);
     }
-  };
+  }
 
   function endCall() {
     engineRef.current?.stop();
@@ -254,6 +329,8 @@ export default function Mentor() {
     setPhase(IDLE);
     setLevel(0);
     setInterim("");
+    setArmed(false);
+    armedRef.current = false;
   }
 
   function send() {
@@ -280,10 +357,11 @@ export default function Mentor() {
                 <Orb phase={phase} level={level} />
                 <div className="pill mono text-white/70">{mmss}</div>
                 <div className="text-[13px] text-zinc-400 h-5">
-                  {phase === RECORDING && "Listening — talk, then I auto-send on pause"}
+                  {phase === HOT && (armed ? "Listening — ask your question" : 'Say "Scribble" to ask')}
+                  {phase === RECORDING && (wakeMode && !armed ? 'Heard you — keep going…' : "Listening — talk, then I auto-send on pause")}
                   {phase === THINKING && (interim && interim !== "…" ? `“${interim}”` : "Thinking…")}
                   {phase === SPEAKING && "Speaking…"}
-                  {phase === IDLE && (autoListen ? "Ready — say something" : "Tap the mic")}
+                  {phase === IDLE && (wakeMode ? 'Say "Scribble" to ask' : autoListen ? "Ready — say something" : "Tap the mic")}
                 </div>
                 {error && <div className="text-[12px] text-[#fca5a5]">{error}</div>}
               </div>
@@ -351,10 +429,22 @@ export default function Mentor() {
                     </button>
                   </div>
                   <div className="flex items-center justify-between mt-2.5 px-1">
-                    <label className="flex items-center gap-2 text-[11.5px] text-zinc-500 cursor-pointer select-none">
-                      <input type="checkbox" checked={autoListen} onChange={(e) => setAutoListen(e.target.checked)} className="accent-[#7c6cff]" />
-                      auto-listen after answers
-                    </label>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={toggleWake}
+                        className={`pill !text-[10.5px] transition-colors ${wakeMode ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
+                        title='Wake word: say "Scribble" to ask'
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${wakeMode ? "bg-[#7c6cff] animate-pulse" : "bg-zinc-600"}`} />
+                        wake "Scribble"
+                      </button>
+                      {!wakeMode && (
+                        <label className="flex items-center gap-2 text-[11.5px] text-zinc-500 cursor-pointer select-none">
+                          <input type="checkbox" checked={autoListen} onChange={(e) => setAutoListen(e.target.checked)} className="accent-[#7c6cff]" />
+                          auto-listen
+                        </label>
+                      )}
+                    </div>
                     <div className="flex gap-1.5">
                       {["notes", "quiz", "cards"].map((p) => (
                         <button key={p} onClick={() => setPanel(panel === p ? null : p)} className={`pill !text-[10.5px] ${panel === p ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400"}`}>
@@ -400,7 +490,7 @@ function StartScreen({ onStart }) {
       <div className="text-center">
         <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Study with your mentor</h1>
         <p className="text-zinc-500 text-[13.5px] mt-2 max-w-sm leading-relaxed">
-          A voice call with your notes. Ask out loud, get answers from your own pages — pull up quizzes and flashcards mid-call.
+          A voice call with your notes. Enable the wake word and just say “Scribble…” to ask anything — pull up quizzes and flashcards mid-call.
         </p>
       </div>
       <button onClick={onStart} className="btn btn-primary !rounded-full !px-8 !py-3.5 text-base">
@@ -416,8 +506,9 @@ function Orb({ phase, level, big }) {
   const scale = phase === RECORDING ? 1 + Math.min(level / 120, 0.35) : 1;
   const color =
     phase === SPEAKING ? "#4CC9F0" :
-    phase === RECORDING ? "#7c6cff" :
-    phase === THINKING ? "#FBBF24" : "#52525b";
+    phase === THINKING ? "#FBBF24" :
+    phase === RECORDING || phase === HOT ? (armed ? "#34d399" : "#7c6cff") :
+    "#52525b";
   return (
     <div className="relative flex items-center justify-center" style={{ width: size * 1.9, height: size * 1.9 }}>
       <div className="absolute rounded-full transition-all duration-150" style={{ width: size * scale, height: size * scale, background: `radial-gradient(circle at 35% 30%, ${color}, ${color}44 60%, transparent 75%)`, filter: `blur(${phase === IDLE ? 14 : 8}px)` }} />
