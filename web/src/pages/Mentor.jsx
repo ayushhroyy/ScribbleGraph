@@ -451,7 +451,7 @@ export default function Mentor() {
             <>
               {/* stage */}
               <div className="pt-6 pb-4 flex flex-col items-center gap-3 shrink-0">
-                <Orb phase={phase} level={level} />
+                <Orb phase={phase} level={level} armed={armed} />
                 <div className="pill mono text-white/70">{mmss}</div>
                 <div className="text-[13px] text-zinc-400 h-5">
                   {enrollStep ? `Say "Scribble" — sample ${Math.min(enrollBlobsRef.current.length + 1, 3)}/3`
@@ -614,7 +614,7 @@ function StartScreen({ onStart }) {
   );
 }
 
-function Orb({ phase, level, big }) {
+function Orb({ phase, level, big, armed }) {
   const size = big ? 120 : 84;
   const scale = phase === RECORDING ? 1 + Math.min(level / 120, 0.35) : 1;
   const color =
