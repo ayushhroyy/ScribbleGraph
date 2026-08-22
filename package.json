@@ -1,0 +1,13 @@
+{
+  "name": "scribblegraph",
+  "private": true,
+  "workspaces": ["web", "worker"],
+  "scripts": {
+    "install:all": "npm install --workspaces --include-workspace-root",
+    "dev": "concurrently -n web,api \"npm run dev -w web\" \"npm run dev -w worker\"",
+    "build": "npm run build -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

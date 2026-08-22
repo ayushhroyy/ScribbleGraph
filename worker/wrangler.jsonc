@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "scribblegraph-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "r2_buckets": [
+    { "binding": "BUCKET", "bucket_name": "scribblegraph" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "scribblegraph-db",
+      "database_id": "d187fdc2-90e4-4b45-abd4-280e9e79651e"
+    }
+  ],
+  "vectorize": [
+    { "binding": "VEC", "index_name": "scribblegraph-chunks" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "QUEUE", "queue": "process-page" }],
+    "consumers": [
+      {
+        "queue": "process-page",
+        "max_batch_size": 1,
+        "max_retries": 3
+      }
+    ]
+  },
+  "vars": {
+    "OCR_MODEL": "mistral-ocr-latest",
+    "CHAT_MODEL": "mistral-small-latest",
+    "EMBED_MODEL": "mistral-embed"
+  }
+}

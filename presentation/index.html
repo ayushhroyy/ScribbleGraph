@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ScribbleGraph — presentation</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #09090b; color: #f4f4f5;
+    font-family: -apple-system, "Segoe UI", Inter, sans-serif; overflow: hidden; }
+  .slide { display: none; height: 100vh; flex-direction: column;
+    align-items: center; justify-content: center; padding: 3.2vh 6vw 7.5vh; gap: 1.9vh; }
+  .slide.active { display: flex; }
+  .kicker { color: #a99fff; font-size: clamp(11px, 1.3vw, 14px); font-weight: 700;
+    letter-spacing: .22em; text-transform: uppercase; }
+  h1 { font-size: clamp(32px, 5vw, 60px); font-weight: 800; letter-spacing: -.02em; text-align: center; }
+  h2 { font-size: clamp(20px, 3vw, 36px); font-weight: 700; letter-spacing: -.01em; text-align: center; }
+  p.sub { color: #a1a1aa; font-size: clamp(13px, 1.6vw, 18px); text-align: center;
+    max-width: 58ch; line-height: 1.55; }
+  .shot { max-height: 56vh; max-width: 86vw; width: auto; height: auto;
+    border-radius: 12px; border: 1px solid rgba(255,255,255,.1);
+    box-shadow: 0 26px 70px rgba(0,0,0,.55); }
+  .callouts { display: flex; gap: 1vw; flex-wrap: wrap; justify-content: center; }
+  .co { display: flex; align-items: center; gap: .5vw; color: #d4d4d8;
+    font-size: clamp(11px, 1.25vw, 14px); }
+  .co b { color: #a99fff; font-weight: 700; }
+  .co .n { display: inline-flex; align-items: center; justify-content: center;
+    width: 1.5vw; height: 1.5vw; min-width: 18px; min-height: 18px;
+    border-radius: 99px; background: #7c6cff; color: #fff;
+    font-size: clamp(9px, 1vw, 12px); font-weight: 700; }
+  .num { position: fixed; top: 2.6vh; right: 3.4vw; color: #52525b;
+    font-size: 13px; font-variant-numeric: tabular-nums; z-index: 10; }
+  /* flow diagram */
+  .flow { display: flex; align-items: stretch; gap: .9vw; justify-content: center; }
+  .step { background: #131316; border: 1px solid rgba(255,255,255,.09); border-radius: 16px;
+    padding: 1.5vh 1.2vw; text-align: center; width: 11.5vw; min-width: 120px; }
+  .step .ic { font-size: clamp(22px, 2.8vw, 32px); }
+  .step b { display: block; font-size: clamp(12px, 1.4vw, 16px); margin-top: .7vh; }
+  .step small { color: #71717a; font-size: clamp(10px, 1.05vw, 12.5px);
+    display: block; margin-top: .4vh; line-height: 1.4; }
+  .arrow { align-self: center; color: #52525b; font-size: clamp(16px, 2vw, 24px); }
+  .stack { display: flex; gap: .7vw; flex-wrap: wrap; justify-content: center; max-width: 60vw; }
+  .chip { border: 1px solid rgba(255,255,255,.12); border-radius: 999px;
+    padding: .8vh 1.1vw; font-size: clamp(11px, 1.25vw, 14px); color: #d4d4d8; }
+  .url { color: #a99fff; font-size: clamp(13px, 1.5vw, 17px); font-weight: 600; }
+  .logo { display: flex; align-items: center; gap: 12px; }
+  .nav { position: fixed; bottom: 2vh; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px; z-index: 10; }
+  .nav button { background: #131316; color: #d4d4d8; border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px; width: 34px; height: 34px; font-size: 15px; cursor: pointer; }
+  .nav button:hover { background: #1c1c21; color: #fff; }
+  .dots { display: flex; gap: 7px; }
+  .dots i { width: 7px; height: 7px; border-radius: 99px; background: #27272a; cursor: pointer; }
+  .dots i.on { background: #7c6cff; }
+  /* PDF export: one slide per page, PowerPoint-widescreen size */
+  @page { size: 1280px 720px; margin: 0; }
+  @media print {
+    html, body { overflow: visible; height: auto; background: #09090b;
+      -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .slide { display: flex !important; height: 100vh; page-break-after: always;
+      break-after: page; }
+    .slide:last-of-type { page-break-after: auto; break-after: auto; }
+    .nav, .num { display: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 1 · TITLE -->
+<section class="slide active">
+  <div class="logo">
+    <svg width="46" height="46" viewBox="0 0 100 100"><circle cx="30" cy="36" r="13" fill="#7C6CFF"/><circle cx="71" cy="62" r="10" fill="#4CC9F0"/><path d="M39 44 L63 56" stroke="#6b6b74" stroke-width="4" stroke-linecap="round"/></svg>
+  </div>
+  <h1>ScribbleGraph</h1>
+  <p class="sub">Turn handwritten notes into a smart, searchable knowledge graph —<br/>capture, digitize, link, and learn. Built for engineering students.</p>
+  <p class="url">scribblegraph-api.youtopialabs.workers.dev</p>
+</section>
+
+<!-- 2 · PROBLEM -->
+<section class="slide">
+  <span class="kicker">The problem</span>
+  <h2>Your best notes are trapped on paper.</h2>
+  <p class="sub">Derivations, diagrams, formulas — hours of work you can't search, can't back up, and forget in a week. Old topics never connect to new ones when you revise.</p>
+  <div class="flow">
+    <div class="step"><span class="ic">🔍</span><b>Not searchable</b><small>find that formula from 3 weeks ago? good luck</small></div>
+    <div class="step"><span class="ic">🔗</span><b>Not connected</b><small>revision notes never link back to originals</small></div>
+    <div class="step"><span class="ic">⚠️</span><b>Not safe</b><small>one lost notebook = everything gone</small></div>
+  </div>
+</section>
+
+<!-- 3 · HOME -->
+<section class="slide">
+  <span class="kicker">The app · home</span>
+  <h2>Everything in one place.</h2>
+  <img class="shot" src="shots/home.png" alt="home dashboard">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Capture</b>&nbsp;— start a scan from camera or photos</span>
+    <span class="co"><span class="n">2</span><b>Your sessions</b>&nbsp;— each capture becomes a titled note card</span>
+    <span class="co"><span class="n">3</span><b>Stats</b>&nbsp;— pages, concepts and cross-links found so far</span>
+  </div>
+</section>
+
+<!-- 4 · CAPTURE -->
+<section class="slide">
+  <span class="kicker">Step 1 · capture</span>
+  <h2>Just flip the pages. The camera does the rest.</h2>
+  <div class="flow">
+    <div class="step"><span class="ic">📷</span><b>Open camera</b><small>auto-finds the page in view</small></div>
+    <span class="arrow">→</span>
+    <div class="step"><span class="ic">🎯</span><b>Guided</b><small>"move closer" · "hold steady"</small></div>
+    <span class="arrow">→</span>
+    <div class="step"><span class="ic">✨</span><b>Auto-snap</b><small>each page captured + counted</small></div>
+    <span class="arrow">→</span>
+    <div class="step"><span class="ic">✅</span><b>Done</b><small>one tap to upload & process</small></div>
+  </div>
+  <p class="sub">No buttons while scanning, no manual cropping. The app cleans up skew and glare, keeps the pages in order, then hands them to the AI pipeline.</p>
+</section>
+
+<!-- 5 · PROCESSING -->
+<section class="slide">
+  <span class="kicker">Step 2 · process</span>
+  <h2>Every page gets digitized in seconds.</h2>
+  <img class="shot" src="shots/session.png" alt="session processing">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Live progress</b>&nbsp;— each page shows its pipeline stage</span>
+    <span class="co"><span class="n">2</span><b>OCR confidence</b>&nbsp;— handwriting quality scored per page</span>
+    <span class="co"><span class="n">3</span><b>Auto-titled</b>&nbsp;— AI names the session from its content</span>
+  </div>
+</section>
+
+<!-- 6 · NOTE VIEW -->
+<section class="slide">
+  <span class="kicker">Step 3 · read</span>
+  <h2>Scan and text, side by side.</h2>
+  <img class="shot" src="shots/note.png" alt="note view">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Original scan</b>&nbsp;— always kept, clickable regions</span>
+    <span class="co"><span class="n">2</span><b>Extracted text</b>&nbsp;— editable if OCR misreads a word</span>
+    <span class="co"><span class="n">3</span><b>Related notes</b>&nbsp;— cards linking to other days (next slide)</span>
+  </div>
+</section>
+
+<!-- 7 · CROSS-DAY LINKS -->
+<section class="slide">
+  <span class="kicker">The magic ✨</span>
+  <h2>It remembers what you wrote 2 weeks ago.</h2>
+  <p class="sub">Each page is compared, by meaning, against every page you've ever captured. When today's notes cover the same idea as an old one, they get linked — automatically.</p>
+  <div class="flow">
+    <div class="step"><small>Aug 6 · lecture</small><span class="ic">📐</span><b>Fourier Series</b><small>the original derivation</small></div>
+    <span class="arrow">→</span>
+    <div class="step"><small>Aug 13 · lecture</small><span class="ic">📊</span><b>Fourier Transform</b><small>builds on the same idea</small></div>
+    <span class="arrow">→</span>
+    <div class="step"><small>Aug 20 · revision</small><span class="ic">🔁</span><b>Summary</b><small>links back to both, with match %</small></div>
+  </div>
+  <p class="sub">45 connections were found across 18 pages from 7 different days — imagine a full semester.</p>
+</section>
+
+<!-- 8 · GRAPH -->
+<section class="slide">
+  <span class="kicker">Step 4 · explore</span>
+  <h2>Your whole subject, as a map.</h2>
+  <img class="shot" src="shots/graph.png" alt="concept graph">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Nodes</b>&nbsp;— concepts the AI found in your notes</span>
+    <span class="co"><span class="n">2</span><b>Colors</b>&nbsp;— grouped by subject (math, physics, circuits…)</span>
+    <span class="co"><span class="n">3</span><b>Lines</b>&nbsp;— concepts that appear together in your pages</span>
+  </div>
+</section>
+
+<!-- 9 · ASK -->
+<section class="slide">
+  <span class="kicker">Step 5 · ask</span>
+  <h2>Ask your notes anything.</h2>
+  <img class="shot" src="shots/ask.png" alt="ask AI chat">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Answer</b>&nbsp;— written only from your own notes, not the internet</span>
+    <span class="co"><span class="n">2</span><b>Sources</b>&nbsp;— every answer cites the exact page and day it came from</span>
+  </div>
+</section>
+
+<!-- 10 · QUIZ -->
+<section class="slide">
+  <span class="kicker">Step 6 · study</span>
+  <h2>It turns your notes into a quiz.</h2>
+  <img class="shot" src="shots/quiz.png" alt="quiz">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Pick a session</b>&nbsp;— questions are generated from those pages</span>
+    <span class="co"><span class="n">2</span><b>Explanations</b>&nbsp;— each answer is explained using your own notes</span>
+  </div>
+</section>
+
+<!-- 11 · FLASHCARDS -->
+<section class="slide">
+  <span class="kicker">Step 6 · study</span>
+  <h2>And flashcards that repeat what you forget.</h2>
+  <img class="shot" src="shots/cards.png" alt="flashcards">
+  <div class="callouts">
+    <span class="co"><span class="n">1</span><b>Tap to flip</b>&nbsp;— question front, answer back</span>
+    <span class="co"><span class="n">2</span><b>Spaced repetition</b>&nbsp;— missed cards return sooner, "knew it" cards later</span>
+  </div>
+</section>
+
+<!-- 12 · STACK + CLOSE -->
+<section class="slide">
+  <span class="kicker">How it's built</span>
+  <h2>Simple stack. Real product. Live today.</h2>
+  <div class="stack">
+    <span class="chip">📸 js-document-autocapture — camera scanning</span>
+    <span class="chip">🔍 Mistral OCR — handwriting to text</span>
+    <span class="chip">🧠 Mistral embeddings — meaning matching</span>
+    <span class="chip">☁️ Cloudflare Workers — API + pipeline</span>
+    <span class="chip">🪣 R2 — page images</span>
+    <span class="chip">🗄 D1 — notes database</span>
+    <span class="chip">🔮 Vectorize — semantic search</span>
+    <span class="chip">⚡ Queues — background processing</span>
+  </div>
+  <p class="sub" style="margin-top:1vh">Open the link on your phone, capture a page, and watch it get digitized, linked and quizzable.</p>
+  <p class="url">scribblegraph-api.youtopialabs.workers.dev</p>
+  <p class="sub" style="color:#71717a">ScribbleGraph — your notebook, connected.</p>
+</section>
+
+<div class="num" id="num"></div>
+<nav class="nav">
+  <button id="prev" aria-label="previous">‹</button>
+  <div class="dots" id="dots"></div>
+  <button id="next" aria-label="next">›</button>
+</nav>
+
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  const dots = document.getElementById('dots');
+  const num = document.getElementById('num');
+  let i = 0;
+  slides.forEach((_, k) => {
+    const d = document.createElement('i');
+    d.onclick = () => go(k);
+    dots.appendChild(d);
+  });
+  function go(n) {
+    i = (n + slides.length) % slides.length;
+    slides.forEach((s, k) => s.classList.toggle('active', k === i));
+    [...dots.children].forEach((d, k) => d.classList.toggle('on', k === i));
+    num.textContent = (i + 1) + ' / ' + slides.length;
+  }
+  document.getElementById('prev').onclick = () => go(i - 1);
+  document.getElementById('next').onclick = () => go(i + 1);
+  addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ') go(i + 1);
+    if (e.key === 'ArrowLeft') go(i - 1);
+  });
+  go(0);
+</script>
+</body>
+</html>
