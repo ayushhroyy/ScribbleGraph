@@ -2,19 +2,28 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { blip, buzz, uploadSession } from "../lib.js";
 
-const GUIDE = {
-  DOCUMENT_NOT_FOUND: "Point at your notebook",
-  MOVE_CLOSER: "Move closer",
-  HOLD_STEADY: "Hold steady…",
-  CAPTURING: "Captured",
-};
+/**
+ * We do NOT use the library's internal auto-capture (its score gates are
+ * strict & hard-coded: score>=0.58, edgeContrast>=0.18 — plain notebook
+ * pages on a desk fail them forever). Instead we drive capture ourselves
+ * from `frame` events + `captureManual()`, with forgiving thresholds.
+ */
+const AREA_MIN = 0.05; // page fills ≥5% of frame
+const STABLE_MS = 900; // quad still for ~0.9s
+const MOVE_TOL = 0.03; // relative movement tolerance per frame
+const COOLDOWN_MS = 1300;
 
 export default function Capture() {
   const nav = useNavigate();
   const videoRef = useRef(null);
   const scannerRef = useRef(null);
+  const autoRef = useRef(true);
+  const lockRef = useRef(false); // shutter / snap in progress
+  const coolRef = useRef(0); // cooldown until ts
+  const anchorRef = useRef(null); // {center, area, t} stability anchor
+  const stableAccRef = useRef(0);
   const fileRef = useRef();
-  const [guidance, setGuidance] = useState("Starting camera…");
+
   const [ready, setReady] = useState(false);
   const [auto, setAuto] = useState(true);
   const [captures, setCaptures] = useState([]);
@@ -22,7 +31,10 @@ export default function Capture() {
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [snapping, setSnapping] = useState(false);
+  const [hint, setHint] = useState("Starting camera…");
   const [toast, setToast] = useState(null);
+  const [diag, setDiag] = useState(null);
+  const [showDiag, setShowDiag] = useState(false);
 
   useEffect(() => {
     let dead = false;
@@ -32,30 +44,76 @@ export default function Capture() {
         if (dead || !videoRef.current) return;
         const scanner = createScanner({
           videoElement: videoRef.current,
-          autoCapture: true,
+          autoCapture: false, // we trigger captures ourselves
           cocoSsd: false,
-          // forgiving stability tuning: shorter steady window + higher
-          // movement tolerance so slight hand tremor doesn't reset the hold
-          stabilityWindowMs: 180,
-          movementThresholdRatio: 0.03,
-          minStableConfidence: 0.35,
-          autoCaptureConsecutiveStableFrames: 3,
-          autoCaptureCooldownMs: 900,
-          autoCaptureMinAreaFraction: 0.1,
         });
-        scanner.on("guidance", (code) => setGuidance(GUIDE[code] ?? code.replaceAll("_", " ").toLowerCase()));
-        scanner.on("capture", (result) => {
-          blip();
-          buzz();
-          setCaptures((p) => [...p, result.blob]);
-          setUrls((p) => [...p, URL.createObjectURL(result.blob)]);
-        });
+
         scanner.on("error", (e) => setError(e?.message ?? "Camera error"));
+
+        scanner.on("frame", (f) => {
+          const det = f.detection;
+          const cand = det?.bestCandidate;
+          const now = performance.now();
+          const v = videoRef.current;
+          const diagSq = v ? Math.hypot(v.videoWidth || 1, v.videoHeight || 1) : 1;
+
+          // diagnostics line (always computed, shown if toggled)
+          const dline = cand
+            ? `src ${cand.source ?? "?"} · score ${(cand.score * 100).toFixed(0)}% · area ${((cand.metrics?.areaFraction ?? 0) * 100).toFixed(0)}% · stable ${stableAccRef.current.toFixed(0)}ms`
+            : det?.status === "rejected"
+              ? `no doc (${det.rejectionReason ?? "?"})`
+              : "no doc";
+          setDiag(dline);
+
+          const fail = (msg, reset = true) => {
+            setHint(msg);
+            if (reset) { anchorRef.current = null; stableAccRef.current = 0; }
+          };
+
+          if (!cand || det.status !== "found") return fail("Point at your notebook");
+          const area = cand.metrics?.areaFraction ?? 0;
+          if (area < AREA_MIN) return fail("Move closer");
+
+          // brightness gate only (ignore the lib's strict blur/glare gates)
+          const bright = f.quality?.brightness;
+          if (bright && !bright.ok) return fail(bright.averageLuma < 60 ? "Too dark" : "Too bright");
+
+          // ---- our own stability: quad center+size must stay put ----
+          const q = cand.quad;
+          const cx = (q.topLeft.x + q.topRight.x + q.bottomRight.x + q.bottomLeft.x) / 4;
+          const cy = (q.topLeft.y + q.topRight.y + q.bottomRight.y + q.bottomLeft.y) / 4;
+          const a = anchorRef.current;
+          if (!a) {
+            anchorRef.current = { cx, cy, area, t: now };
+            stableAccRef.current = 0;
+            return fail("Hold steady…", false);
+          }
+          const move = (Math.hypot(cx - a.cx, cy - a.cy) / diagSq) + Math.abs(area - a.area) / Math.max(a.area, 1e-6) * 0.5;
+          if (move > MOVE_TOL) {
+            anchorRef.current = { cx, cy, area, t: now };
+            stableAccRef.current = 0;
+            return fail("Hold steady…", false);
+          }
+          stableAccRef.current += now - a.t;
+          anchorRef.current.t = now;
+
+          if (stableAccRef.current < STABLE_MS) return fail("Hold steady…", false);
+          setHint("Captured");
+
+          // ---- fire ----
+          if (autoRef.current && now > coolRef.current && !lockRef.current) {
+            coolRef.current = now + COOLDOWN_MS;
+            anchorRef.current = null;
+            stableAccRef.current = 0;
+            snap(true);
+          }
+        });
+
         await scanner.start();
         if (dead) return void scanner.destroy();
         scannerRef.current = scanner;
         setReady(true);
-        setGuidance("Point at your notebook");
+        setHint("Point at your notebook");
       } catch (e) {
         setError(e?.message ?? String(e));
       }
@@ -66,31 +124,36 @@ export default function Capture() {
     };
   }, []);
 
+  async function snap(fromAuto = false) {
+    const scanner = scannerRef.current;
+    if (!scanner || lockRef.current) return;
+    lockRef.current = true;
+    setSnapping(true);
+    try {
+      const result = await scanner.captureManual();
+      blip(fromAuto ? 920 : 1040);
+      buzz();
+      setCaptures((p) => [...p, result.blob]);
+      setUrls((p) => [...p, URL.createObjectURL(result.blob)]);
+    } catch (e) {
+      flash(e?.message ?? "Couldn't capture — try again");
+    } finally {
+      lockRef.current = false;
+      setTimeout(() => setSnapping(false), 350);
+    }
+  }
+
   function flash(msg) {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   }
 
   function toggleAuto() {
-    const next = !auto;
-    setAuto(next);
-    try {
-      scannerRef.current?.updateConfig({ autoCapture: next });
-      flash(next ? "Auto-capture on" : "Manual mode — use the shutter");
-    } catch {}
-  }
-
-  async function snap() {
-    const scanner = scannerRef.current;
-    if (!scanner || snapping) return;
-    setSnapping(true);
-    try {
-      await scanner.captureManual();
-    } catch (e) {
-      flash(e?.message ?? "Couldn't capture — try again");
-    } finally {
-      setTimeout(() => setSnapping(false), 400);
-    }
+    setAuto((a) => {
+      autoRef.current = !a;
+      flash(!a ? "Auto-capture on" : "Manual mode — use the shutter");
+      return !a;
+    });
   }
 
   async function finish() {
@@ -118,19 +181,14 @@ export default function Capture() {
 
   return (
     <div className="fixed inset-0 bg-black z-50 flex flex-col pt-safe">
-      {/* video */}
       <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover" />
 
       {/* framing mask */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute inset-[6%] rounded-3xl" style={{ boxShadow: "0 0 0 100vmax rgba(0,0,0,0.55)" }} />
-        {ready && (
-          <>
-            <div className="absolute inset-[6%] rounded-3xl border border-white/25" />
-            {auto && guidance === "Hold steady…" && (
-              <div className="absolute inset-x-[10%] top-[8%] h-0.5 bg-[#7c6cff] scanline rounded-full" />
-            )}
-          </>
+        <div className="absolute inset-[6%] rounded-3xl" style={{ boxShadow: "0 0 0 100vmax rgba(0,0,0,0.5)" }} />
+        {ready && <div className="absolute inset-[6%] rounded-3xl border border-white/25" />}
+        {ready && auto && hint === "Hold steady…" && (
+          <div className="absolute inset-x-[10%] top-[8%] h-0.5 bg-[#7c6cff] scanline rounded-full" />
         )}
       </div>
 
@@ -145,25 +203,28 @@ export default function Capture() {
               <span className="w-1.5 h-1.5 rounded-full bg-[#34d399]" />
               {captures.length} {captures.length === 1 ? "page" : "pages"}
             </>
-          ) : (
-            "0 pages"
-          )}
+          ) : "0 pages"}
         </div>
-        {/* auto / manual toggle */}
-        <button
-          onClick={toggleAuto}
-          disabled={!ready}
-          className={`pill text-white/90 transition-opacity ${ready ? "" : "opacity-40"}`}
-          title="Toggle auto-capture"
-        >
-          <span className={`w-1.5 h-1.5 rounded-full ${auto ? "bg-[#7c6cff]" : "bg-zinc-500"}`} />
-          {auto ? "Auto" : "Manual"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowDiag((s) => !s)} disabled={!ready} className={`pill text-white/70 ${ready ? "" : "opacity-40"}`} title="Diagnostics">
+            ⓘ
+          </button>
+          <button onClick={toggleAuto} disabled={!ready} className={`pill text-white/90 ${ready ? "" : "opacity-40"}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${auto ? "bg-[#7c6cff]" : "bg-zinc-500"}`} />
+            {auto ? "Auto" : "Manual"}
+          </button>
+        </div>
       </div>
 
       <div className="flex-1" />
 
-      {/* toast */}
+      {/* diagnostics */}
+      {showDiag && diag && (
+        <div className="relative z-20 flex justify-center mb-2 px-6">
+          <span className="pill mono !text-[10px] text-white/70">{diag}</span>
+        </div>
+      )}
+
       {toast && (
         <div className="relative z-20 flex justify-center mb-2 px-6">
           <span className="pill text-white/90 fade-up">{toast}</span>
@@ -173,9 +234,9 @@ export default function Capture() {
       {/* guidance */}
       {ready && (
         <div className="relative z-10 flex justify-center mb-4 px-6">
-          <div className={`pill text-white/90 text-xs ${guidance === "Hold steady…" ? "!border-[#7c6cff]/50" : ""}`}>
+          <div className={`pill text-white/90 text-xs ${hint === "Hold steady…" ? "!border-[#7c6cff]/50" : ""}`}>
             {!auto ? (captures.length ? "Frame the page, tap the shutter" : "Tap the shutter to capture") :
-             guidance === "Captured" ? <span className="text-[#34d399]">✓ {guidance}</span> : guidance}
+             hint === "Captured" ? <span className="text-[#34d399]">✓ Captured</span> : hint}
           </div>
         </div>
       )}
@@ -215,22 +276,16 @@ export default function Capture() {
             >
               <UndoIcon />
             </button>
-            {/* shutter */}
             <button
-              onClick={snap}
+              onClick={() => snap()}
               disabled={!ready || snapping}
               className="w-[72px] h-[72px] rounded-full border-[3px] border-white/90 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-50"
-              title={auto ? "Capture now" : "Capture"}
             >
               <span className={`w-[56px] h-[56px] rounded-full flex items-center justify-center transition-colors ${snapping ? "bg-[#34d399]" : "bg-white"}`}>
                 {snapping ? <CheckIcon /> : <ShutterIcon />}
               </span>
             </button>
-            <button
-              onClick={finish}
-              disabled={!captures.length || uploading}
-              className="btn btn-primary !rounded-full !px-5 !py-3"
-            >
+            <button onClick={finish} disabled={!captures.length || uploading} className="btn btn-primary !rounded-full !px-5 !py-3">
               {uploading ? <><Spinner /> …</> : "Done"}
             </button>
           </div>

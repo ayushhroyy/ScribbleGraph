@@ -226,37 +226,53 @@ app.post("/api/chat", async (c) => {
   }
 
   const [qvec] = await embed(c.env, [question]);
-  const res = { matches: await queryVectors(c.env, qvec, 6) };
+  const matches = await queryVectors(c.env, qvec, 8);
+  // mistral-embed baseline similarity is ~0.72 for unrelated text — only
+  // genuinely relevant chunks pass, so answers stop quoting random sessions
+  const RELEVANT = 0.75;
 
-  const sources: { sessionId: string; pageTitle: string; dayLabel: string; text: string }[] = [];
-  const contextParts: string[] = [];
-  for (const m of res.matches) {
-    if (!m.score || m.score < 0.5) continue;
-    const meta = (m.metadata ?? {}) as any;
+  const byPage = new Map<string, { score: number; text: string; row: any }>();
+  const hits = matches.filter((m) => m.score >= RELEVANT).sort((a, b) => b.score - a.score);
+  for (const m of hits) {
     const row = await c.env.DB.prepare(
-      `SELECT ch.text, p.idx AS page_idx, p.session_id, s.created_at AS session_date, s.title
+      `SELECT ch.text, p.id AS page_id, p.idx AS page_idx, p.session_id, s.created_at AS session_date, s.title
        FROM chunks ch JOIN pages p ON p.id = ch.page_id JOIN sessions s ON s.id = p.session_id
        WHERE ch.id = ?1`
     )
       .bind(String(m.id))
       .first<any>();
     if (!row) continue;
-    const d = new Date(row.session_date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    sources.push({ sessionId: row.session_id, pageTitle: row.title ?? "Notes", dayLabel: `${d} · Page ${row.page_idx + 1}`, text: row.text.slice(0, 200) });
-    contextParts.push(`[Source: ${row.title ?? "notes"}, ${d}, page ${row.page_idx + 1}]\n${row.text}`);
+    const prev = byPage.get(row.page_id);
+    if (prev) {
+      if (m.score > prev.score) { prev.score = m.score; prev.text = row.text; }
+      prev.text = prev.text === row.text ? prev.text : `${prev.text}\n${row.text}`;
+      continue;
+    }
+    byPage.set(row.page_id, { score: m.score, text: row.text, row });
+  }
+  const picked = [...byPage.values()].sort((a, b) => b.score - a.score).slice(0, 4);
+
+  const sources: { sessionId: string; pageTitle: string; dayLabel: string; text: string }[] = [];
+  const contextParts: string[] = [];
+  for (const p of picked) {
+    const d = new Date(p.row.session_date).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    sources.push({ sessionId: p.row.session_id, pageTitle: p.row.title ?? "Notes", dayLabel: `${d} · Page ${p.row.page_idx + 1}`, text: p.text.slice(0, 200) });
+    contextParts.push(`[Source: ${p.row.title ?? "notes"}, ${d}, page ${p.row.page_idx + 1}]\n${p.text}`);
   }
 
-  const answer = await chat(c.env, [
-    {
-      role: "system",
-      content:
-        "You are ScribbleGraph, a study assistant. Answer ONLY from the user's own notes provided below. Cite sources inline like (Day notes, Page N). If the notes don't cover it, say so.",
-    },
-    {
-      role: "user",
-      content: `My notes:\n\n${contextParts.join("\n\n") || "(no relevant notes found)"}\n\nQuestion: ${question}`,
-    },
-  ]);
+  const answer = picked.length
+    ? await chat(c.env, [
+        {
+          role: "system",
+          content:
+            "You are ScribbleGraph, a study assistant. Answer ONLY from the user's own notes provided below. Cite sources inline like (Source title, Page N). If the notes don't cover the question, say so plainly.",
+        },
+        {
+          role: "user",
+          content: `My notes:\n\n${contextParts.join("\n\n")}\n\nQuestion: ${question}`,
+        },
+      ])
+    : "I couldn't find anything about that in your notes yet. Try capturing pages on this topic — or ask about a topic already in your library.";
 
   const msgId = uuid();
   await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'user',?3,NULL,?4)")
@@ -512,6 +528,86 @@ Search in a balanced BST is O(log n) — each comparison halves the remaining tr
 Self-balancing trees (AVL, red-black) rotate on insert to guarantee the log depth.
 
 Heaps: complete binary trees with the heap property; push and pop are O(log n), peek is O(1).`,
+    ],
+  },
+  {
+    title: "Integration Techniques — Calculus",
+    daysAgo: 11,
+    pages: [
+      `# Integration by Parts
+
+Formula from the product rule:
+integral of u dv = uv - integral of v du
+
+Choose u by LIATE (Log, Inverse trig, Algebraic, Trig, Exponential) — whichever comes first becomes u.
+
+Classic example: integral of x e^x dx = x e^x - e^x + C.`,
+      `# Substitution and Partial Fractions
+
+u-substitution reverses the chain rule: pick u so that du appears in the integral.
+
+Partial fractions split a rational function into simpler pieces:
+(3x+2)/(x(x+1)) = A/x + B/(x+1)
+
+Solve for A and B by matching coefficients, then integrate each term separately. Works for any proper rational function with factorable denominator.`,
+    ],
+  },
+  {
+    title: "Chemistry — Acids & Bases",
+    daysAgo: 9,
+    pages: [
+      `# pH and Strong Acids
+
+pH = -log10 [H+]. Each pH unit is a 10x change in acidity.
+
+Strong acids (HCl, HNO3) dissociate completely — [H+] equals the acid concentration. Weak acids reach equilibrium described by Ka.
+
+For weak acids: [H+] = sqrt(Ka · C) when dissociation is small.`,
+      `# Buffers and Titration
+
+A buffer resists pH change: a weak acid plus its conjugate base (e.g. acetic acid + acetate).
+
+Henderson-Hasselbalch: pH = pKa + log([A-]/[HA]). Maximum buffering when pH = pKa.
+
+At the half-equivalence point of a titration, pH equals pKa — that's where the curve is flattest.`,
+    ],
+  },
+  {
+    title: "Algorithms — Sorting & Big-O",
+    daysAgo: 5,
+    pages: [
+      `# Sorting Complexity
+
+Merge sort: O(n log n) always, but needs O(n) extra space. Stable.
+Quick sort: O(n log n) average, O(n^2) worst case (bad pivots), in-place. Not stable.
+Insertion sort: O(n^2), but O(n) on nearly-sorted data — great for small arrays.
+
+Real libraries use hybrid: insertion sort for tiny partitions, quicksort for the middle, sometimes mergesort for stability.`,
+      `# Hash Tables and Collisions
+
+Hash table: average O(1) lookup, insert, delete. Worst case O(n) if everything collides.
+
+Collision handling: chaining (linked lists per bucket) vs open addressing (probe for the next free slot).
+
+Good hash functions spread keys uniformly — a bad one turns the table into one long list.`,
+    ],
+  },
+  {
+    title: "Mechanics — Newton's Laws",
+    daysAgo: 2,
+    pages: [
+      `# Newton's Second Law and Free-Body Diagrams
+
+F = ma. Draw every force on the object separately: weight, normal, tension, friction.
+
+On an incline of angle theta, gravity splits into mg sin(theta) along the slope and mg cos(theta) into it. Friction opposes motion: f = mu N.
+
+Solve by applying F = ma along each axis independently.`,
+      `# Work, Energy and Momentum
+
+Work-energy theorem: net work = change in kinetic energy. Conservative forces (gravity, springs) have potential energy; friction does not.
+
+Momentum p = mv is conserved in every collision. Elastic collisions also conserve kinetic energy; inelastic ones lose some to heat and deformation.`,
     ],
   },
   {
