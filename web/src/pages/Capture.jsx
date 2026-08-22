@@ -8,10 +8,12 @@ import { blip, buzz, uploadSession } from "../lib.js";
  * pages on a desk fail them forever). Instead we drive capture ourselves
  * from `frame` events + `captureManual()`, with forgiving thresholds.
  */
-const AREA_MIN = 0.05; // page fills ≥5% of frame
-const STABLE_MS = 900; // quad still for ~0.9s
-const MOVE_TOL = 0.03; // relative movement tolerance per frame
-const COOLDOWN_MS = 1300;
+const AREA_MIN = 0.04; // page fills ≥4% of frame
+const STABLE_MS = 550; // quad still for ~0.55s → capture
+const MOVE_TOL = 0.05; // generous movement tolerance
+const LOST_MS = 700; // detector dropout grace — don't reset stability on flicker
+const FORCE_MS = 2200; // page continuously in view this long → capture anyway
+const COOLDOWN_MS = 1200;
 
 export default function Capture() {
   const nav = useNavigate();
@@ -20,8 +22,10 @@ export default function Capture() {
   const autoRef = useRef(true);
   const lockRef = useRef(false); // shutter / snap in progress
   const coolRef = useRef(0); // cooldown until ts
-  const anchorRef = useRef(null); // {center, area, t} stability anchor
+  const anchorRef = useRef(null); // {cx, cy, area, t} stability anchor
   const stableAccRef = useRef(0);
+  const seenRef = useRef(0); // first-seen ts of current page-in-view streak
+  const lastSeenRef = useRef(0); // last frame ts with a candidate
   const fileRef = useRef();
 
   const [ready, setReady] = useState(false);
@@ -57,28 +61,59 @@ export default function Capture() {
           const v = videoRef.current;
           const diagSq = v ? Math.hypot(v.videoWidth || 1, v.videoHeight || 1) : 1;
 
-          // diagnostics line (always computed, shown if toggled)
           const dline = cand
-            ? `src ${cand.source ?? "?"} · score ${(cand.score * 100).toFixed(0)}% · area ${((cand.metrics?.areaFraction ?? 0) * 100).toFixed(0)}% · stable ${stableAccRef.current.toFixed(0)}ms`
+            ? `src ${cand.source ?? "?"} · score ${(cand.score * 100).toFixed(0)}% · area ${((cand.metrics?.areaFraction ?? 0) * 100).toFixed(0)}% · stable ${stableAccRef.current.toFixed(0)}ms · seen ${seenRef.current ? ((now - seenRef.current) / 1000).toFixed(1) + "s" : "0"}`
             : det?.status === "rejected"
               ? `no doc (${det.rejectionReason ?? "?"})`
               : "no doc";
           setDiag(dline);
 
-          const fail = (msg, reset = true) => {
-            setHint(msg);
-            if (reset) { anchorRef.current = null; stableAccRef.current = 0; }
+          const reset = () => {
+            anchorRef.current = null;
+            stableAccRef.current = 0;
+            seenRef.current = 0;
+          };
+          const fire = () => {
+            if (!autoRef.current || now < coolRef.current || lockRef.current) return false;
+            coolRef.current = now + COOLDOWN_MS;
+            reset();
+            setHint("Captured");
+            snap(true);
+            return true;
           };
 
-          if (!cand || det.status !== "found") return fail("Point at your notebook");
+          // ---- detection lost: tolerate brief flicker before resetting ----
+          if (!cand || det.status !== "found") {
+            const lostFor = now - lastSeenRef.current;
+            if (seenRef.current && lostFor > LOST_MS) {
+              reset();
+              setHint("Point at your notebook");
+            } else if (seenRef.current) {
+              setHint("Hold steady…");
+            } else {
+              setHint("Point at your notebook");
+            }
+            return;
+          }
+          lastSeenRef.current = now;
+          if (!seenRef.current) seenRef.current = now;
+
           const area = cand.metrics?.areaFraction ?? 0;
-          if (area < AREA_MIN) return fail("Move closer");
+          if (area < AREA_MIN) {
+            setHint("Move closer");
+            return;
+          }
 
-          // brightness gate only (ignore the lib's strict blur/glare gates)
           const bright = f.quality?.brightness;
-          if (bright && !bright.ok) return fail(bright.averageLuma < 60 ? "Too dark" : "Too bright");
+          if (bright && !bright.ok) {
+            setHint(bright.averageLuma < 60 ? "Too dark" : "Too bright");
+            return;
+          }
 
-          // ---- our own stability: quad center+size must stay put ----
+          // ---- force capture: page in view long enough, stability optional ----
+          if (now - seenRef.current >= FORCE_MS && fire()) return;
+
+          // ---- stability: quad center+size staying put ----
           const q = cand.quad;
           const cx = (q.topLeft.x + q.topRight.x + q.bottomRight.x + q.bottomLeft.x) / 4;
           const cy = (q.topLeft.y + q.topRight.y + q.bottomRight.y + q.bottomLeft.y) / 4;
@@ -86,27 +121,20 @@ export default function Capture() {
           if (!a) {
             anchorRef.current = { cx, cy, area, t: now };
             stableAccRef.current = 0;
-            return fail("Hold steady…", false);
+            setHint("Hold steady…");
+            return;
           }
-          const move = (Math.hypot(cx - a.cx, cy - a.cy) / diagSq) + Math.abs(area - a.area) / Math.max(a.area, 1e-6) * 0.5;
+          const move = Math.hypot(cx - a.cx, cy - a.cy) / diagSq + (Math.abs(area - a.area) / Math.max(a.area, 1e-6)) * 0.5;
           if (move > MOVE_TOL) {
             anchorRef.current = { cx, cy, area, t: now };
             stableAccRef.current = 0;
-            return fail("Hold steady…", false);
+            setHint("Hold steady…");
+            return;
           }
           stableAccRef.current += now - a.t;
           anchorRef.current.t = now;
-
-          if (stableAccRef.current < STABLE_MS) return fail("Hold steady…", false);
-          setHint("Captured");
-
-          // ---- fire ----
-          if (autoRef.current && now > coolRef.current && !lockRef.current) {
-            coolRef.current = now + COOLDOWN_MS;
-            anchorRef.current = null;
-            stableAccRef.current = 0;
-            snap(true);
-          }
+          if (stableAccRef.current >= STABLE_MS) fire();
+          else setHint("Hold steady…");
         });
 
         await scanner.start();
@@ -129,6 +157,11 @@ export default function Capture() {
     if (!scanner || lockRef.current) return;
     lockRef.current = true;
     setSnapping(true);
+    // any capture starts a fresh cooldown + page-streak so auto doesn't double-fire
+    coolRef.current = performance.now() + COOLDOWN_MS;
+    anchorRef.current = null;
+    stableAccRef.current = 0;
+    seenRef.current = 0;
     try {
       const result = await scanner.captureManual();
       blip(fromAuto ? 920 : 1040);
