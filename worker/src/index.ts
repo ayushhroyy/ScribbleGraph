@@ -852,6 +852,9 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
 }
 
+/* SPA fallback: anything not matched (client-side routes like /mentor) → static assets */
+app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
+
 export default {
   fetch: app.fetch,
   async queue(batch: MessageBatch<{ pageId: string; sessionId: string; r2Key: string }>, env: Env, _ctx: ExecutionContext) {
