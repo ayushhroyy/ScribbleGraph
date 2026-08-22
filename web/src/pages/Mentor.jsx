@@ -16,10 +16,10 @@ function pickMime() {
 }
 
 class VoiceEngine {
-  constructor({ onSilenceEnd, onLevel } = {}) {
+  constructor({ onSilenceEnd, onLevel, onSpeech } = {}) {
     this.onSilenceEnd = onSilenceEnd;
-      this.onLevel = onLevel;
-      this.onSpeech = onSpeech;
+    this.onLevel = onLevel;
+    this.onSpeech = onSpeech;
     this.stream = null;
     this.ctx = null;
     this.analyser = null;
