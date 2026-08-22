@@ -2,10 +2,37 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import Nav from "../components/Nav.jsx";
 import { api, blip } from "../lib.js";
-import { enrollFromBlobs, isWakeWord, saveWake, loadWake } from "../wake.js";
 
 /* ------------------------------------------------------------------ */
-/* voice engine: MediaRecorder + AnalyserNode silence detection        */
+/* wake word helpers (text-level, fuzzy)                               */
+/* ------------------------------------------------------------------ */
+
+function lev(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 3) return 9;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 1; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[m][n];
+}
+
+function parseWake(text) {
+  const words = text.toLowerCase().replace(/[^a-z\s']/g, "").split(/\s+/).filter(Boolean);
+  let at = -1;
+  for (let i = 0; i < Math.min(words.length, 5); i++) {
+    if (lev(words[i], "scribble") <= 2 || lev(words[i], "scribbles") <= 2 || lev(words[i], "skribbl") <= 2 || lev(words[i], "scribe") <= 1) { at = i; break; }
+  }
+  if (at === -1) return { word: null, question: "" };
+  let rest = words.slice(at + 1);
+  while (rest.length && /^(hey|ok|okay|hi|yo|please|can|you|could|would)$/.test(rest[0])) rest.shift();
+  return { word: words[at], question: rest.join(" ").trim() };
+}
+
+/* ------------------------------------------------------------------ */
+/* fallback voice engine (MediaRecorder + Voxtral STT)                 */
+/* used only when the browser has no built-in speech recognition       */
 /* ------------------------------------------------------------------ */
 
 function pickMime() {
@@ -16,20 +43,12 @@ function pickMime() {
 }
 
 class VoiceEngine {
-  constructor({ onSilenceEnd, onLevel, onSpeech } = {}) {
+  constructor({ onSilenceEnd, onLevel } = {}) {
     this.onSilenceEnd = onSilenceEnd;
     this.onLevel = onLevel;
-    this.onSpeech = onSpeech;
-    this.stream = null;
-    this.ctx = null;
-    this.analyser = null;
-    this.rec = null;
-    this.chunks = [];
-    this.raf = null;
-    this.spoke = false;
-    this.lastLoud = 0;
-    this.lastQuiet = 0;
-    this.stopped = false;
+    this.stream = null; this.ctx = null; this.analyser = null;
+    this.rec = null; this.chunks = []; this.raf = null;
+    this.spoke = false; this.lastLoud = 0; this.stopped = false;
   }
 
   async start() {
@@ -45,13 +64,12 @@ class VoiceEngine {
     this.rec = new MediaRecorder(this.stream, mime ? { mimeType: mime } : undefined);
     this.chunks = [];
     this.spoke = false;
-    this.lastLoud = 0;
-    this.lastQuiet = performance.now();
+    this.lastLoud = performance.now();
     this.rec.ondataavailable = (e) => e.data.size && this.chunks.push(e.data);
     this.rec.start(250);
 
     const buf = new Uint8Array(this.analyser.frequencyBinCount);
-    const THRESH = 14; // rms-ish amplitude out of 128
+    const THRESH = 14;
     const loop = () => {
       if (this.stopped) return;
       this.analyser.getByteTimeDomainData(buf);
@@ -64,11 +82,10 @@ class VoiceEngine {
       this.onLevel?.(level);
       const now = performance.now();
       if (level > THRESH) {
-        if (!this.spoke) this.onSpeech?.();
         this.lastLoud = now;
         this.spoke = true;
       } else if (this.spoke && now - this.lastLoud > 1400) {
-        this.stop(); // silence after speech → end of question
+        this.stop();
         this.onSilenceEnd?.();
         return;
       }
@@ -94,69 +111,46 @@ class VoiceEngine {
   }
 }
 
+async function stt(blob) {
+  const fd = new FormData();
+  fd.append("audio", blob, "q.webm");
+  const { text } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
+  return (text ?? "").trim();
+}
+
 /* ------------------------------------------------------------------ */
 
-const IDLE = "idle", THINKING = "thinking", SPEAKING = "speaking", RECORDING = "recording", HOT = "hot";
-
-/* ---- wake word: fuzzy "scribble" match + question extraction ---- */
-function lev(a, b) {
-  const m = a.length, n = b.length;
-  if (Math.abs(m - n) > 3) return 9;
-  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
-  for (let j = 1; j <= n; j++) d[0][j] = j;
-  for (let i = 1; i <= m; i++)
-    for (let j = 1; j <= n; j++)
-      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-  return d[m][n];
-}
-
-function parseWake(text) {
-  const words = text.toLowerCase().replace(/[^a-z\s']/g, "").split(/\s+/).filter(Boolean);
-  let at = -1;
-  for (let i = 0; i < Math.min(words.length, 4); i++) {
-    if (lev(words[i], "scribble") <= 2 || lev(words[i], "scribbles") <= 2 || lev(words[i], "skribbl") <= 2) { at = i; break; }
-  }
-  if (at === -1) return { word: null, question: "" };
-  let rest = words.slice(at + 1);
-  while (rest.length && /^(hey|ok|okay|hi|yo|please|can|you|could|would)$/.test(rest[0])) rest.shift();
-  return { word: words[at], question: rest.join(" ").trim() };
-}
+const IDLE = "idle", RECORDING = "recording", THINKING = "thinking", SPEAKING = "speaking", HOT = "hot";
+const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
 
 export default function Mentor() {
-  const [phase, setPhase] = useState(IDLE); // call orb state
+  const [phase, setPhase] = useState(IDLE);
   const [callLive, setCallLive] = useState(false);
   const [callSecs, setCallSecs] = useState(0);
   const [messages, setMessages] = useState([]);
   const [chatId, setChatId] = useState(null);
   const [level, setLevel] = useState(0);
-  const [autoListen, setAutoListen] = useState(true);
+  const [handsFree, setHandsFree] = useState(true);   // auto-listen after answers
+  const [wakeMode, setWakeMode] = useState(false);    // must say "Scribble" first
   const [voiceOn, setVoiceOn] = useState(true);
-  const [wakeMode, setWakeMode] = useState(false);
-  const [armed, setArmed] = useState(false); // wake word said, awaiting question
-  const [wakeData, setWakeData] = useState(null); // enrolled on-device templates
-  const [enrollStep, setEnrollStep] = useState(0); // 0 = off, 1..3 = teaching samples
   const [text, setText] = useState("");
-  const [panel, setPanel] = useState(null); // notes | quiz | cards
+  const [panel, setPanel] = useState(null);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState(null);
 
-  const engineRef = useRef(null);
-  const audioRef = useRef(null);
-  const busyRef = useRef(false);
-  const endRef = useRef(null);
-  const autoListenRef = useRef(autoListen);
-  const startListeningRef = useRef(null);
+  const engineRef = useRef(null);       // fallback VoiceEngine
+  const recogRef = useRef(null);        // SpeechRecognition
+  const wantListenRef = useRef(false);  // should be listening when idle
   const wakeRef = useRef(false);
-  const armedRef = useRef(false);
-  const wakeDataRef = useRef(null);
-  const enrollStepRef = useRef(0);
-  const enrollBlobsRef = useRef([]);
-  useEffect(() => { autoListenRef.current = autoListen; }, [autoListen]);
-  useEffect(() => { wakeDataRef.current = wakeData; }, [wakeData]);
-  useEffect(() => { enrollStepRef.current = enrollStep; }, [enrollStep]);
-  useEffect(() => { setWakeData(loadWake()); }, []);
+  const armedRef = useRef(false);       // wake word heard, awaiting question
+  const bypassRef = useRef(false);      // next utterance skips wake gate (manual)
+  const busyRef = useRef(false);        // thinking/speaking
+  const audioRef = useRef(null);
+  const endRef = useRef(null);
 
-  /* call timer */
+  const [armedUI, setArmedUI] = useState(false);
+  useEffect(() => { wakeRef.current = wakeMode; if (!wakeMode) { armedRef.current = false; setArmedUI(false); } }, [wakeMode]);
+
   useEffect(() => {
     if (!callLive) return;
     const t = setInterval(() => setCallSecs((s) => s + 1), 1000);
@@ -169,40 +163,7 @@ export default function Mentor() {
 
   const mmss = `${String(Math.floor(callSecs / 60)).padStart(2, "0")}:${String(callSecs % 60).padStart(2, "0")}`;
 
-  /* ---------------- voice turn ---------------- */
-
-  const resumeAfterAnswer = () => {
-    if (wakeRef.current || autoListenRef.current) startListeningRef.current?.(true);
-    else setPhase(IDLE);
-  };
-
-  const speak = useCallback(async (answerText) => {
-    if (!voiceOn) {
-      resumeAfterAnswer();
-      return;
-    }
-    try {
-      setPhase(SPEAKING);
-      const res = await fetch("/api/mentor/speak", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: answerText }),
-      });
-      if (!res.ok) throw new Error("tts");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      audioRef.current?.pause();
-      const a = new Audio(url);
-      audioRef.current = a;
-      a.onended = () => {
-        URL.revokeObjectURL(url);
-        resumeAfterAnswer();
-      };
-      await a.play();
-    } catch {
-      setPhase(IDLE);
-    }
-  }, [voiceOn]);
+  /* ---------------- asking + speaking ---------------- */
 
   const askMentor = useCallback(async (question) => {
     if (!question.trim() || busyRef.current) return;
@@ -220,258 +181,250 @@ export default function Mentor() {
       setPhase(IDLE);
     } finally {
       busyRef.current = false;
+      // resume listening if hands-free
+      if (wantListenRef.current && !busyRef.current) ensureListening();
     }
-  }, [chatId, speak]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId, voiceOn, handsFree]);
 
-  const restartHot = useCallback(() => {
+  async function speak(answerText) {
+    if (!voiceOn) return;
+    try {
+      setPhase(SPEAKING);
+      const res = await fetch("/api/mentor/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: answerText }),
+      });
+      if (!res.ok) throw new Error("tts");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      audioRef.current?.pause();
+      const a = new Audio(url);
+      audioRef.current = a;
+      await new Promise((resolve) => {
+        a.onended = resolve;
+        a.onerror = resolve;
+        a.play().catch(resolve);
+      });
+      URL.revokeObjectURL(url);
+    } catch {}
+    setPhase(wakeRef.current ? HOT : IDLE);
+  }
+
+  /* ---------------- utterance routing ---------------- */
+
+  function routeUtterance(said) {
+    if (!said) return;
+    const direct = bypassRef.current;
+    bypassRef.current = false;
+
+    if (!wakeRef.current || direct) {
+      askMentor(said);
+      return;
+    }
+    if (armedRef.current) {
+      armedRef.current = false;
+      setArmedUI(false);
+      askMentor(said);
+      return;
+    }
+    const { word, question } = parseWake(said);
+    if (!word) return; // wake mode on, no wake word → ignore completely
+    if (question && question.split(/\s+/).length >= 2) {
+      askMentor(question);
+      return;
+    }
+    armedRef.current = true; // just the word → arm for the question
+    setArmedUI(true);
+    blip(1240);
     setPhase(HOT);
-    startListeningRef.current?.(true);
+  }
+
+  /* ---------------- primary: browser SpeechRecognition ---------------- */
+
+  function startSR() {
+    if (recogRef.current) return;
+    const R = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new R();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+
+    rec.onresult = (e) => {
+      if (busyRef.current) return;
+      let finalText = "";
+      let interimText = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+        else interimText += r[0].transcript;
+      }
+      if (interimText && !finalText) {
+        setInterim(interimText);
+        setPhase(RECORDING);
+        // live wake detection: word heard mid-speech → show armed immediately
+        if (wakeRef.current && !armedRef.current && !bypassRef.current && parseWake(interimText).word) {
+          armedRef.current = true;
+          setArmedUI(true);
+          blip(1240);
+        }
+      }
+      if (finalText.trim()) routeUtterance(finalText.trim());
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        setError("Mic blocked — allow microphone access and try again.");
+        wantListenRef.current = false;
+      }
+    };
+    rec.onend = () => {
+      recogRef.current = null;
+      // Chrome stops after silence — restart while the call wants a mic
+      if (wantListenRef.current && !busyRef.current) setTimeout(() => { if (wantListenRef.current && !recogRef.current) startSR(); }, 300);
+    };
+
+    try {
+      rec.start();
+      recogRef.current = rec;
+      setPhase(wakeRef.current ? HOT : RECORDING);
+    } catch {
+      recogRef.current = null;
+    }
+  }
+
+  function stopSR() {
+    wantListenRef.current = false;
+    try { recogRef.current?.stop(); } catch {}
+    recogRef.current = null;
+    setInterim("");
+    setPhase(IDLE);
+  }
+
+  /* ---------------- fallback: Voxtral loop ---------------- */
+
+  const startFallback = useCallback(() => {
+    if (engineRef.current || busyRef.current) return;
+    const eng = new VoiceEngine({
+      onLevel: (l) => setLevel(l),
+      onSilenceEnd: async () => {
+        const blob = await eng.stop();
+        engineRef.current = null;
+        setLevel(0);
+        if (!blob || blob.size < 3000) {
+          if (wantListenRef.current) startFallback();
+          else setPhase(IDLE);
+          return;
+        }
+        setPhase(THINKING);
+        setInterim("…");
+        try {
+          const said = await stt(blob);
+          setInterim(said);
+          routeUtterance(said);
+        } catch {
+          setError("Couldn't hear that — try again.");
+          setPhase(wakeRef.current ? HOT : IDLE);
+        }
+        // re-arm loop after routing (askMentor resumes listening itself)
+        if (!busyRef.current && wantListenRef.current) setTimeout(() => { if (wantListenRef.current && !engineRef.current && !busyRef.current) startFallback(); }, 400);
+      },
+    });
+    engineRef.current = eng;
+    setPhase(wakeRef.current ? HOT : RECORDING);
+    eng.start().catch((e) => {
+      engineRef.current = null;
+      setError(e?.message ?? "Mic unavailable — check permissions.");
+      wantListenRef.current = false;
+      setPhase(IDLE);
+    });
   }, []);
 
-  const handleUtterance = useCallback(async (blob, direct) => {
-    const idlePhase = wakeRef.current ? HOT : IDLE;
-    if (!blob || blob.size < 3000) {
-      setInterim("");
-      if (wakeRef.current && !direct) restartHot();
-      else setPhase(idlePhase);
-      return;
-    }
+  function ensureListening() {
+    if (!callLive || busyRef.current) return;
+    wantListenRef.current = handsFree || wakeMode ? true : wantListenRef.current;
+    if (!wantListenRef.current) return;
+    if (SR) startSR();
+    else startFallback();
+  }
 
-    /* ---- on-device wake gate: costs zero API calls ----
-       Utterances are matched against local "Scribble" templates and only
-       sent to STT if the wake word is heard (or audio can't be decoded). */
-    let localHit = false, localUndecoded = false;
-    if (!direct && wakeRef.current && !armedRef.current && wakeDataRef.current) {
-      let r;
-      try { r = await isWakeWord(blob, wakeDataRef.current); }
-      catch { r = { hit: false, undecoded: true, dur: 0 }; }
-      localHit = r.hit;
-      localUndecoded = !!r.undecoded;
-      if (!localHit && !localUndecoded) return restartHot(); // not the word — audio never leaves the device
-      if (localHit && r.dur <= 1.6) {
-        // bare "Scribble" → arm; next utterance is the question
-        armedRef.current = true;
-        setArmed(true);
-        return restartHot();
-      }
-      // wake + question in one breath (dur > 1.6), or undecodable → STT below
-    }
+  /* ---------------- call controls ---------------- */
 
-    setPhase(THINKING);
-    setInterim("…");
-    try {
-      const fd = new FormData();
-      fd.append("audio", blob, "q.webm");
-      const { text: said } = await api("/api/mentor/transcribe", { method: "POST", body: fd });
-      if (!said) {
-        setInterim("");
-        if (wakeRef.current && !direct) restartHot();
-        else setPhase(idlePhase);
-        return;
-      }
-      setInterim(said);
-
-      if (!direct && wakeRef.current && !armedRef.current) {
-        const { word, question } = parseWake(said);
-        if (!word && !localHit) return restartHot(); // STT agrees: no wake word
-        if (word && question.split(/\s+/).length >= 2) return void askMentor(question);
-        if (!word && localHit) return void askMentor(said); // local heard it, ASR mangled the word
-        armedRef.current = true;
-        setArmed(true);
-        return restartHot();
-      }
-
-      armedRef.current = false;
-      setArmed(false);
-      askMentor(said);
-    } catch {
-      setInterim("");
-      setError("Couldn't hear that — try again.");
-      if (wakeRef.current && !direct) restartHot();
-      else setPhase(idlePhase);
-    }
-  }, [askMentor, restartHot]);
-
-  const startListening = useCallback(async (fromAuto = false) => {
-    if (busyRef.current || engineRef.current || enrollStepRef.current) return;
+  function startCall() {
+    setCallLive(true);
+    setCallSecs(0);
+    setMessages([]);
+    setChatId(null);
     setError(null);
-    try {
-      const eng = new VoiceEngine({
-        onLevel: (l) => setLevel(l),
-        onSpeech: () => setPhase(RECORDING),
-        onSilenceEnd: async () => {
-          const blob = await eng.stop();
-          engineRef.current = null;
-          setLevel(0);
-          handleUtterance(blob, false);
-        },
-      });
-      engineRef.current = eng;
-      setPhase(fromAuto && wakeRef.current ? HOT : RECORDING);
-      await eng.start();
-    } catch (e) {
-      engineRef.current = null;
-      setError(e?.message ?? "Mic unavailable — use text or check permissions.");
-      setPhase(IDLE);
-    }
-  }, [handleUtterance]);
-
-  startListeningRef.current = startListening;
-
-  const stopListeningManually = async () => {
-    const eng = engineRef.current;
-    if (!eng) return;
-    const blob = await eng.stop();
-    engineRef.current = null;
-    setLevel(0);
-    armedRef.current = false;
-    setArmed(false);
-    handleUtterance(blob, true); // manual capture always bypasses the wake gate
-  };
-
-  /* ---- wake word enrollment (on-device templates) ---- */
-
-  async function captureEnrollSample() {
-    if (busyRef.current || engineRef.current) return;
-    try {
-      const eng = new VoiceEngine({
-        onLevel: (l) => setLevel(l),
-        onSpeech: () => setPhase(RECORDING),
-        onSilenceEnd: async () => {
-          const blob = await eng.stop();
-          engineRef.current = null;
-          setLevel(0);
-          if (!enrollStepRef.current) return; // cancelled
-          if (!blob || blob.size < 2500) return captureEnrollSample(); // too quiet, retry sample
-          blip();
-          enrollBlobsRef.current.push(blob);
-          if (enrollBlobsRef.current.length >= 3) return void finishEnrollment();
-          setEnrollStep(enrollBlobsRef.current.length + 1);
-          captureEnrollSample();
-        },
-      });
-      engineRef.current = eng;
-      setPhase(RECORDING);
-      await eng.start();
-    } catch (e) {
-      setError(e?.message ?? "Mic unavailable for setup");
-      cancelEnrollment();
-    }
-  }
-
-  async function finishEnrollment() {
-    setEnrollStep(0);
-    setPhase(THINKING);
-    const data = await enrollFromBlobs(enrollBlobsRef.current);
-    if (!data) {
-      setError("Couldn't analyze those samples — try setup again.");
-      setPhase(IDLE);
-      return;
-    }
-    saveWake(data);
-    setWakeData(data);
-    blip(1200);
-    setWakeMode(true);
-    wakeRef.current = true;
-    setInterim("");
-    startListening(true);
-  }
-
-  function startEnrollment() {
-    engineRef.current?.stop();
-    engineRef.current = null;
-    setLevel(0);
-    enrollBlobsRef.current = [];
-    setEnrollStep(1);
-    captureEnrollSample();
-  }
-
-  function cancelEnrollment() {
-    setEnrollStep(0);
-    engineRef.current?.stop();
-    engineRef.current = null;
-    setLevel(0);
-    if (wakeMode) startListening(true);
-    else setPhase(IDLE);
-  }
-
-  function toggleWake() {
-    if (enrollStep) return cancelEnrollment();
-    if (wakeMode) {
-      // off
-      setWakeMode(false);
-      wakeRef.current = false;
-      armedRef.current = false;
-      setArmed(false);
-      engineRef.current?.stop();
-      engineRef.current = null;
-      setLevel(0);
-      setPhase(IDLE);
-      return;
-    }
-    if (wakeData) {
-      setWakeMode(true);
-      wakeRef.current = true;
-      if (callLive) startListening(true);
-    } else {
-      startEnrollment(); // first use → teach the word
-    }
+    wantListenRef.current = true;
+    setTimeout(() => { if (SR) startSR(); else startFallback(); }, 200);
   }
 
   function endCall() {
+    wantListenRef.current = false;
+    stopSR();
     engineRef.current?.stop();
     engineRef.current = null;
     audioRef.current?.pause();
+    bypassRef.current = false;
+    armedRef.current = false;
+    setArmedUI(false);
     setCallLive(false);
     setPhase(IDLE);
     setLevel(0);
     setInterim("");
-    setArmed(false);
-    armedRef.current = false;
+  }
+
+  function micTap() {
+    if (busyRef.current) return;
+    if (!SR && engineRef.current) return; // fallback: silence-end handles send
+    if (recogRef.current && !wakeRef.current) {
+      // listening in plain mode → pause
+      stopSR();
+      return;
+    }
+    // start listening now; next utterance bypasses the wake gate
+    wantListenRef.current = true;
+    bypassRef.current = true;
+    if (!recogRef.current) startSR();
+    setPhase(RECORDING);
   }
 
   function send() {
     const q = text.trim();
-    if (!q) return;
+    if (!q || busyRef.current) return;
     setText("");
     askMentor(q);
   }
 
   /* ---------------- render ---------------- */
 
+  const listeningNow = SR ? !!recogRef.current : !!engineRef.current;
+
   return (
     <div className="h-screen flex flex-col">
       <Nav />
       <main className="flex-1 flex min-h-0 max-w-7xl w-full mx-auto">
-        {/* call column */}
         <section className={`flex-1 flex flex-col min-w-0 ${panel ? "hidden lg:flex" : "flex"}`}>
           {!callLive ? (
-            <StartScreen onStart={() => { setCallLive(true); setCallSecs(0); setMessages([]); setChatId(null); }} />
+            <StartScreen onStart={startCall} sr={!!SR} />
           ) : (
             <>
-              {/* stage */}
               <div className="pt-6 pb-4 flex flex-col items-center gap-3 shrink-0">
-                <Orb phase={phase} level={level} armed={armed} />
+                <Orb phase={phase} level={level} armed={armedUI} />
                 <div className="pill mono text-white/70">{mmss}</div>
-                <div className="text-[13px] text-zinc-400 h-5">
-                  {enrollStep ? `Say "Scribble" — sample ${Math.min(enrollBlobsRef.current.length + 1, 3)}/3`
-                  : phase === HOT ? (armed ? "Listening — ask your question" : 'Say "Scribble" (checked on-device)')
-                  : phase === RECORDING ? (wakeMode && !armed ? "Heard something… checking" : "Listening — talk, then I auto-send on pause")
-                  : phase === THINKING ? (interim && interim !== "…" ? `“${interim}”` : "Thinking…")
+                <div className="text-[13px] text-zinc-400 h-5 text-center px-6">
+                  {phase === THINKING ? (interim && interim !== "…" ? `“${interim}”` : "Thinking…")
                   : phase === SPEAKING ? "Speaking…"
-                  : wakeMode ? 'Say "Scribble" to ask'
-                  : autoListen ? "Ready — say something"
+                  : armedUI ? "Listening — ask your question"
+                  : wakeMode ? (SR ? 'Say "Scribble" then your question' : 'Say "Scribble" then your question')
+                  : listeningNow ? (interim ? `“${interim}”` : "Listening — just talk, it sends when you pause")
+                  : handsFree ? "Starting mic…"
                   : "Tap the mic"}
                 </div>
-                {enrollStep > 0 && (
-                  <button onClick={cancelEnrollment} className="text-[11px] text-zinc-500 hover:text-white underline underline-offset-2">
-                    cancel setup
-                  </button>
-                )}
                 {error && <div className="text-[12px] text-[#fca5a5]">{error}</div>}
               </div>
 
-              {/* transcript */}
               <div className="flex-1 overflow-y-auto px-5 md:px-8 min-h-0">
                 <div className="max-w-2xl mx-auto space-y-3">
                   {messages.length === 0 && (
@@ -505,7 +458,6 @@ export default function Mentor() {
                 </div>
               </div>
 
-              {/* controls */}
               <div className="border-t border-white/[0.06] px-5 md:px-8 py-3 pb-safe">
                 <div className="max-w-2xl mx-auto">
                   <div className="flex items-center gap-2">
@@ -517,12 +469,12 @@ export default function Mentor() {
                       className="flex-1 card !bg-[#101013] px-4 py-2.5 text-[13px]"
                     />
                     <button
-                      onClick={() => (engineRef.current ? stopListeningManually() : startListening(false))}
+                      onClick={micTap}
                       disabled={phase === THINKING || phase === SPEAKING}
                       className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 transition-all disabled:opacity-40 ${
-                        engineRef.current ? "bg-[#f87171] pulse" : "bg-[#7c6cff]"
+                        listeningNow && !wakeMode ? "bg-[#f87171]" : "bg-[#7c6cff]"
                       }`}
-                      title={engineRef.current ? "Stop & send" : "Talk"}
+                      title={listeningNow && !wakeMode ? "Pause mic" : "Talk now (skips wake word)"}
                     >
                       <MicIcon />
                     </button>
@@ -536,25 +488,17 @@ export default function Mentor() {
                   <div className="flex items-center justify-between mt-2.5 px-1">
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={toggleWake}
-                        className={`pill !text-[10.5px] transition-colors ${
-                          enrollStep ? "!border-[#FBBF24]/60 text-[#FBBF24]" :
-                          wakeMode ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400 hover:text-zinc-200"
-                        }`}
-                        title='Wake word "Scribble" — matched on-device, audio only sent after it is heard'
+                        onClick={() => setWakeMode(!wakeMode)}
+                        className={`pill !text-[10.5px] transition-colors ${wakeMode ? "!border-[#7c6cff]/60 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
+                        title='Only listens after it hears "Scribble"'
                       >
-                        <span className={`w-1.5 h-1.5 rounded-full ${wakeMode ? "bg-[#7c6cff] animate-pulse" : enrollStep ? "bg-[#FBBF24]" : "bg-zinc-600"}`} />
-                        {enrollStep ? "teaching…" : wakeData ? 'wake "Scribble"' : 'set up "Scribble"'}
+                        <span className={`w-1.5 h-1.5 rounded-full ${wakeMode ? "bg-[#7c6cff] animate-pulse" : "bg-zinc-600"}`} />
+                        wake "Scribble"
                       </button>
-                      {wakeMode && wakeData && !enrollStep && (
-                        <button onClick={startEnrollment} className="text-[10.5px] text-zinc-600 hover:text-zinc-300">
-                          re-learn
-                        </button>
-                      )}
                       {!wakeMode && (
                         <label className="flex items-center gap-2 text-[11.5px] text-zinc-500 cursor-pointer select-none">
-                          <input type="checkbox" checked={autoListen} onChange={(e) => setAutoListen(e.target.checked)} className="accent-[#7c6cff]" />
-                          auto-listen
+                          <input type="checkbox" checked={handsFree} onChange={(e) => setHandsFree(e.target.checked)} className="accent-[#7c6cff]" />
+                          hands-free
                         </label>
                       )}
                     </div>
@@ -572,7 +516,6 @@ export default function Mentor() {
           )}
         </section>
 
-        {/* panels (inline while call continues) */}
         {panel && (
           <aside className="w-full lg:w-[400px] shrink-0 border-l border-white/[0.06] overflow-y-auto p-4 fade-up">
             {panel === "notes" && <NotesPanel />}
@@ -596,20 +539,22 @@ export default function Mentor() {
 
 /* ------------------------------------------------------------------ */
 
-function StartScreen({ onStart }) {
+function StartScreen({ onStart, sr }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6 px-6 fade-up">
-      <Orb phase="idle" level={0} big />
+      <Orb phase="idle" level={0} />
       <div className="text-center">
         <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Study with your mentor</h1>
         <p className="text-zinc-500 text-[13.5px] mt-2 max-w-sm leading-relaxed">
-          A voice call with your notes. Enable the wake word and just say “Scribble…” to ask anything — pull up quizzes and flashcards mid-call.
+          A hands-free voice call with your notes. Just talk — it sends when you pause, then answers out loud. Turn on the wake word to say “Scribble…” first.
         </p>
       </div>
       <button onClick={onStart} className="btn btn-primary !rounded-full !px-8 !py-3.5 text-base">
         📞 Start call
       </button>
-      <p className="text-[11px] text-zinc-600">mic permission required · voice by Mistral Voxtral</p>
+      <p className="text-[11px] text-zinc-600">
+        mic permission required · {sr ? "live speech recognition" : "voice via Mistral Voxtral"}
+      </p>
     </div>
   );
 }
@@ -646,15 +591,8 @@ function NotesPanel() {
   const [pages, setPages] = useState(null);
   const [note, setNote] = useState(null);
   useEffect(() => { api("/api/sessions").then((d) => setSessions(d.sessions ?? [])).catch(() => setSessions([])); }, []);
-  async function openSession(id) {
-    setPages(null); setNote(null);
-    const d = await api(`/api/sessions/${id}`);
-    setPages(d.pages ?? []);
-  }
-  async function openPage(id) {
-    const d = await api(`/api/pages/${id}`);
-    setNote(d);
-  }
+  async function openSession(id) { setPages(null); setNote(null); setPages((await api(`/api/sessions/${id}`)).pages ?? []); }
+  async function openPage(id) { setNote(await api(`/api/pages/${id}`)); }
   return (
     <div className="space-y-2">
       <PanelTitle label="Notes" onBack={note ? () => setNote(null) : pages ? () => setPages(null) : null} />
