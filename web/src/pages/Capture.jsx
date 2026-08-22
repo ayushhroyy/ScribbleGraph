@@ -16,10 +16,13 @@ export default function Capture() {
   const fileRef = useRef();
   const [guidance, setGuidance] = useState("Starting camera…");
   const [ready, setReady] = useState(false);
+  const [auto, setAuto] = useState(true);
   const [captures, setCaptures] = useState([]);
   const [urls, setUrls] = useState([]);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [snapping, setSnapping] = useState(false);
+  const [toast, setToast] = useState(null);
 
   useEffect(() => {
     let dead = false;
@@ -27,7 +30,19 @@ export default function Capture() {
       try {
         const { createScanner } = await import("js-document-autocapture");
         if (dead || !videoRef.current) return;
-        const scanner = createScanner({ videoElement: videoRef.current, autoCapture: true, cocoSsd: false });
+        const scanner = createScanner({
+          videoElement: videoRef.current,
+          autoCapture: true,
+          cocoSsd: false,
+          // forgiving stability tuning: shorter steady window + higher
+          // movement tolerance so slight hand tremor doesn't reset the hold
+          stabilityWindowMs: 180,
+          movementThresholdRatio: 0.03,
+          minStableConfidence: 0.35,
+          autoCaptureConsecutiveStableFrames: 3,
+          autoCaptureCooldownMs: 900,
+          autoCaptureMinAreaFraction: 0.1,
+        });
         scanner.on("guidance", (code) => setGuidance(GUIDE[code] ?? code.replaceAll("_", " ").toLowerCase()));
         scanner.on("capture", (result) => {
           blip();
@@ -50,6 +65,33 @@ export default function Capture() {
       try { scannerRef.current?.destroy(); } catch {}
     };
   }, []);
+
+  function flash(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2200);
+  }
+
+  function toggleAuto() {
+    const next = !auto;
+    setAuto(next);
+    try {
+      scannerRef.current?.updateConfig({ autoCapture: next });
+      flash(next ? "Auto-capture on" : "Manual mode — use the shutter");
+    } catch {}
+  }
+
+  async function snap() {
+    const scanner = scannerRef.current;
+    if (!scanner || snapping) return;
+    setSnapping(true);
+    try {
+      await scanner.captureManual();
+    } catch (e) {
+      flash(e?.message ?? "Couldn't capture — try again");
+    } finally {
+      setTimeout(() => setSnapping(false), 400);
+    }
+  }
 
   async function finish() {
     if (!captures.length) return;
@@ -85,7 +127,7 @@ export default function Capture() {
         {ready && (
           <>
             <div className="absolute inset-[6%] rounded-3xl border border-white/25" />
-            {guidance === "Hold steady…" && (
+            {auto && guidance === "Hold steady…" && (
               <div className="absolute inset-x-[10%] top-[8%] h-0.5 bg-[#7c6cff] scanline rounded-full" />
             )}
           </>
@@ -101,22 +143,39 @@ export default function Capture() {
           {captures.length > 0 ? (
             <>
               <span className="w-1.5 h-1.5 rounded-full bg-[#34d399]" />
-              {captures.length} {captures.length === 1 ? "page" : "pages"} captured
+              {captures.length} {captures.length === 1 ? "page" : "pages"}
             </>
           ) : (
             "0 pages"
           )}
         </div>
-        <div className="w-10 h-10" />
+        {/* auto / manual toggle */}
+        <button
+          onClick={toggleAuto}
+          disabled={!ready}
+          className={`pill text-white/90 transition-opacity ${ready ? "" : "opacity-40"}`}
+          title="Toggle auto-capture"
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${auto ? "bg-[#7c6cff]" : "bg-zinc-500"}`} />
+          {auto ? "Auto" : "Manual"}
+        </button>
       </div>
 
       <div className="flex-1" />
+
+      {/* toast */}
+      {toast && (
+        <div className="relative z-20 flex justify-center mb-2 px-6">
+          <span className="pill text-white/90 fade-up">{toast}</span>
+        </div>
+      )}
 
       {/* guidance */}
       {ready && (
         <div className="relative z-10 flex justify-center mb-4 px-6">
           <div className={`pill text-white/90 text-xs ${guidance === "Hold steady…" ? "!border-[#7c6cff]/50" : ""}`}>
-            {guidance === "Captured" ? <span className="text-[#34d399]">✓ {guidance}</span> : guidance}
+            {!auto ? (captures.length ? "Frame the page, tap the shutter" : "Tap the shutter to capture") :
+             guidance === "Captured" ? <span className="text-[#34d399]">✓ {guidance}</span> : guidance}
           </div>
         </div>
       )}
@@ -148,7 +207,7 @@ export default function Capture() {
             <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={onFiles} />
           </div>
         ) : (
-          <div className="flex items-center justify-center gap-4 max-w-sm mx-auto">
+          <div className="flex items-center justify-center gap-6 max-w-sm mx-auto">
             <button
               onClick={() => { setCaptures((p) => p.slice(0, -1)); setUrls((p) => p.slice(0, -1)); }}
               disabled={!captures.length}
@@ -156,16 +215,29 @@ export default function Capture() {
             >
               <UndoIcon />
             </button>
+            {/* shutter */}
+            <button
+              onClick={snap}
+              disabled={!ready || snapping}
+              className="w-[72px] h-[72px] rounded-full border-[3px] border-white/90 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-50"
+              title={auto ? "Capture now" : "Capture"}
+            >
+              <span className={`w-[56px] h-[56px] rounded-full flex items-center justify-center transition-colors ${snapping ? "bg-[#34d399]" : "bg-white"}`}>
+                {snapping ? <CheckIcon /> : <ShutterIcon />}
+              </span>
+            </button>
             <button
               onClick={finish}
               disabled={!captures.length || uploading}
-              className="btn btn-primary !rounded-full !px-8 !py-3.5 flex-1"
+              className="btn btn-primary !rounded-full !px-5 !py-3"
             >
-              {uploading ? <><Spinner /> Uploading…</> : `Done · ${captures.length}`}
+              {uploading ? <><Spinner /> …</> : "Done"}
             </button>
           </div>
         )}
-        <p className="text-center text-[11px] text-white/35 mt-3">Flip pages slowly — each page auto-captures</p>
+        <p className="text-center text-[11px] text-white/35 mt-3">
+          {auto ? "Auto-captures each page — or tap the shutter anytime" : "Tap the shutter for each page"}
+        </p>
       </div>
     </div>
   );
@@ -176,5 +248,13 @@ const XIcon = () => (
 );
 const UndoIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 14 4 9l5-5" /><path d="M4 9h10a6 6 0 0 1 0 12h-3" /></svg>
+);
+const ShutterIcon = () => (
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#09090b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 8h3l2-3h6l2 3h3v12H4z" /> <circle cx="12" cy="13.5" r="3.5" />
+  </svg>
+);
+const CheckIcon = () => (
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#09090b" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
 );
 const Spinner = () => <span className="w-4 h-4 rounded-full border-2 border-white/25 border-t-white animate-spin" />;
