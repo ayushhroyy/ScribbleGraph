@@ -8,6 +8,7 @@ import Session from "./pages/Session.jsx";
 import Note from "./pages/Note.jsx";
 import GraphPage from "./pages/GraphPage.jsx";
 import Ask from "./pages/Ask.jsx";
+import Mentor from "./pages/Mentor.jsx";
 import Quiz from "./pages/Quiz.jsx";
 import Flashcards from "./pages/Flashcards.jsx";
 
@@ -21,6 +22,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
         <Route path="/note/:id" element={<Note />} />
         <Route path="/graph" element={<GraphPage />} />
         <Route path="/ask" element={<Ask />} />
+        <Route path="/mentor" element={<Mentor />} />
         <Route path="/quiz" element={<Quiz />} />
         <Route path="/flashcards" element={<Flashcards />} />
       </Routes>

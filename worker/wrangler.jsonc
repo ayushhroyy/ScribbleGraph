@@ -34,6 +34,9 @@
   "vars": {
     "OCR_MODEL": "mistral-ocr-latest",
     "CHAT_MODEL": "mistral-small-latest",
-    "EMBED_MODEL": "mistral-embed"
+    "EMBED_MODEL": "mistral-embed",
+    "STT_MODEL": "voxtral-mini-2602",
+    "TTS_MODEL": "voxtral-mini-tts-2603",
+    "TTS_VOICE": "en_paul_neutral"
   }
 }

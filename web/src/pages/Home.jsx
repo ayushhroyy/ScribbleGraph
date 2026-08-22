@@ -45,6 +45,9 @@ export default function Home() {
           <Link to="/capture" className="btn btn-primary !px-5 !py-3">
             <CameraGlyph /> Capture pages
           </Link>
+          <Link to="/mentor" className="btn btn-ghost !py-3">
+            🎙 Mentor
+          </Link>
           <button onClick={() => fileRef.current?.click()} className="btn btn-ghost !py-3">
             Upload
           </button>

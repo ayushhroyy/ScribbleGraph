@@ -8,4 +8,7 @@ export interface Env {
   OCR_MODEL: string;
   CHAT_MODEL: string;
   EMBED_MODEL: string;
+  STT_MODEL: string;
+  TTS_MODEL: string;
+  TTS_VOICE: string;
 }

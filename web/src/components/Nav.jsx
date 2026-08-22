@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 
 const tabs = [
   { to: "/", label: "Home", end: true, icon: HomeIcon },
+  { to: "/mentor", label: "Mentor", end: false, icon: MentorIcon },
   { to: "/graph", label: "Graph", end: false, icon: GraphIcon },
   { to: "/capture", label: "Capture", center: true, icon: CameraIcon },
   { to: "/ask", label: "Ask", end: false, icon: ChatIcon },
@@ -46,32 +47,34 @@ export default function Nav() {
       {/* mobile bottom tab bar */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 pb-safe border-t border-white/[0.06] bg-[#0c0c0e]/90 backdrop-blur-xl">
         <div className="grid grid-cols-5 h-16 items-center px-2">
-          {tabs.map((t) =>
-            t.center ? (
-              <button key={t.to} onClick={() => nav(t.to)} className="flex justify-center">
-                <span
-                  className="w-12 h-12 rounded-2xl bg-[#7c6cff] flex items-center justify-center -mt-6"
-                  style={{ boxShadow: "0 8px 24px rgba(124,108,255,.4)" }}
+          {tabs
+            .filter((t) => t.to !== "/mentor")
+            .map((t) =>
+              t.center ? (
+                <button key={t.to} onClick={() => nav(t.to)} className="flex justify-center">
+                  <span
+                    className="w-12 h-12 rounded-2xl bg-[#7c6cff] flex items-center justify-center -mt-6"
+                    style={{ boxShadow: "0 8px 24px rgba(124,108,255,.4)" }}
+                  >
+                    <CameraIcon size={22} />
+                  </span>
+                </button>
+              ) : (
+                <NavLink
+                  key={t.to}
+                  to={t.to}
+                  end={t.end}
+                  className={({ isActive }) =>
+                    `flex flex-col items-center gap-1 py-1.5 transition-colors ${
+                      isActive ? "text-[#a99fff]" : "text-zinc-600"
+                    }`
+                  }
                 >
-                  <CameraIcon size={22} />
-                </span>
-              </button>
-            ) : (
-              <NavLink
-                key={t.to}
-                to={t.to}
-                end={t.end}
-                className={({ isActive }) =>
-                  `flex flex-col items-center gap-1 py-1.5 transition-colors ${
-                    isActive ? "text-[#a99fff]" : "text-zinc-600"
-                  }`
-                }
-              >
-                <t.icon size={20} />
-                <span className="text-[10px] font-medium">{t.label}</span>
-              </NavLink>
-            )
-          )}
+                  <t.icon size={20} />
+                  <span className="text-[10px] font-medium">{t.label}</span>
+                </NavLink>
+              )
+            )}
         </div>
       </nav>
     </>
@@ -92,6 +95,14 @@ function HomeIcon({ size = 20 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 10.5 12 3l9 7.5" /> <path d="M5 9.5V21h14V9.5" />
+    </svg>
+  );
+}
+function MentorIcon({ size = 18 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2a4 4 0 0 1 4 4v5a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
+      <path d="M5 10v1a7 7 0 0 0 14 0v-1M12 19v3" />
     </svg>
   );
 }

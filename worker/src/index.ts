@@ -285,6 +285,53 @@ app.post("/api/chat", async (c) => {
   return c.json({ chatId: id, answer, sources });
 });
 
+/* ---------- mentor (voice) ---------- */
+
+app.post("/api/mentor/transcribe", async (c) => {
+  const form = await c.req.formData();
+  const file = form.get("audio") as File | null;
+  if (!file) return c.json({ error: "audio required" }, 400);
+  const fd = new FormData();
+  fd.append("file", file, file.name || "audio.webm");
+  fd.append("model", c.env.STT_MODEL);
+  const res = await fetch("https://api.mistral.ai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${c.env.MISTRAL_API_KEY}` },
+    body: fd,
+  });
+  if (!res.ok) return c.json({ error: await res.text() }, 502);
+  const json: { text?: string } = await res.json();
+  return c.json({ text: (json.text ?? "").trim() });
+});
+
+app.post("/api/mentor/speak", async (c) => {
+  const { text } = await c.req.json<{ text: string }>();
+  if (!text) return c.json({ error: "text required" }, 400);
+  // speak a trimmed portion for snappy playback; full text lives in the UI
+  let spoken = text.slice(0, 650);
+  const cut = spoken.lastIndexOf(". ");
+  if (cut > 120) spoken = spoken.slice(0, cut + 1);
+  const res = await fetch("https://api.mistral.ai/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${c.env.MISTRAL_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: c.env.TTS_MODEL,
+      input: spoken,
+      voice_id: c.env.TTS_VOICE,
+    }),
+  });
+  if (!res.ok) return c.json({ error: await res.text() }, 502);
+  const json: { audio_data?: string } = await res.json();
+  if (!json.audio_data) return c.json({ error: "no audio" }, 502);
+  const bytes = Uint8Array.from(atob(json.audio_data), (ch) => ch.charCodeAt(0));
+  return new Response(bytes, {
+    headers: { "content-type": "audio/mpeg", "cache-control": "no-store" },
+  });
+});
+
 /* ---------- quiz ---------- */
 
 app.post("/api/quiz/generate", async (c) => {
