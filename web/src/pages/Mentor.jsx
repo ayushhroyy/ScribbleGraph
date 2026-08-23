@@ -151,7 +151,25 @@ export default function Mentor() {
   const endRef = useRef(null);
 
   const [armedUI, setArmedUI] = useState(false);
+  const callLiveRef = useRef(false);
+  const handsFreeRef = useRef(handsFree);
+  useEffect(() => { handsFreeRef.current = handsFree; }, [handsFree]);
   useEffect(() => { wakeRef.current = wakeMode; if (!wakeMode) { armedRef.current = false; setArmedUI(false); } }, [wakeMode]);
+
+  /* watchdog: if the call wants the mic but nothing is running (SR died,
+     start() threw, a turn finished without resuming) — restart it. This is
+     the safety net that guarantees the mic always comes back on. */
+  useEffect(() => {
+    if (!callLive) return;
+    const t = setInterval(() => {
+      if (!callLiveRef.current || !wantListenRef.current || busyRef.current) return;
+      if (recogRef.current || engineRef.current) return;
+      if (SR) startSR();
+      else startFallbackRef.current?.();
+    }, 2000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callLive]);
 
   useEffect(() => {
     if (!callLive) return;
@@ -372,6 +390,9 @@ export default function Mentor() {
       setPhase(wakeRef.current ? HOT : RECORDING);
     } catch {
       recogRef.current = null;
+      // start() can throw InvalidStateError if the previous instance is still
+      // shutting down — retry shortly instead of leaving the mic dead
+      setTimeout(() => { if (wantListenRef.current && !busyRef.current && !recogRef.current) startSR(); }, 500);
     }
   }
 
@@ -422,18 +443,22 @@ export default function Mentor() {
     });
   }, []);
 
+  const startFallbackRef = useRef(null);
+  startFallbackRef.current = startFallback;
+
   function ensureListening() {
-    if (!callLive || busyRef.current) return;
-    wantListenRef.current = handsFree || wakeMode ? true : wantListenRef.current;
+    if (!callLiveRef.current || busyRef.current) return;
+    wantListenRef.current = handsFreeRef.current || wakeRef.current ? true : wantListenRef.current;
     if (!wantListenRef.current) return;
     if (SR) startSR();
-    else startFallback();
+    else startFallbackRef.current?.();
   }
 
   /* ---------------- call controls ---------------- */
 
   function startCall() {
     unlockAudio(); // inside the user gesture — unlocks TTS output for the call
+    callLiveRef.current = true;
     setCallLive(true);
     setCallSecs(0);
     setMessages([]);
@@ -445,6 +470,7 @@ export default function Mentor() {
 
   function endCall() {
     wantListenRef.current = false;
+    callLiveRef.current = false;
     stopSR();
     engineRef.current?.stop();
     engineRef.current = null;
