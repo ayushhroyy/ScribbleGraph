@@ -260,19 +260,24 @@ app.post("/api/chat", async (c) => {
     contextParts.push(`[Source: ${p.row.title ?? "notes"}, ${d}, page ${p.row.page_idx + 1}]\n${p.text}`);
   }
 
-  const answer = picked.length
-    ? await chat(c.env, [
-        {
-          role: "system",
-          content:
-            "You are ScribbleGraph, a study assistant. Answer ONLY from the user's own notes provided below. Cite sources inline like (Source title, Page N). If the notes don't cover the question, say so plainly.",
-        },
-        {
-          role: "user",
-          content: `My notes:\n\n${contextParts.join("\n\n")}\n\nQuestion: ${question}`,
-        },
-      ])
-    : "I couldn't find anything about that in your notes yet. Try capturing pages on this topic — or ask about a topic already in your library.";
+  // RAG is a plug-in: notes ground the answer when relevant, otherwise the
+  // assistant answers from general knowledge instead of refusing.
+  const identity =
+    "You are Scribble, the voice and chat assistant of the ScribbleGraph study app — the user calls you by your wake word \"Scribble\". Be warm and conversational; greet greetings, and if asked who you are, explain that you help them study their captured notes.";
+  const answer = await chat(c.env, [
+    {
+      role: "system",
+      content: identity + " " + (picked.length
+        ? "The user's notes below are your primary source — use them and cite inline like (Source title, Page N). You may supplement with general knowledge when the notes are incomplete; keep note-based claims cited and extra context clearly yours."
+        : "The user's notes don't cover this topic, so answer from general knowledge. Be clear and helpful; you may suggest capturing notes on the topic to get grounded answers next time."),
+    },
+    {
+      role: "user",
+      content: picked.length
+        ? `My notes:\n\n${contextParts.join("\n\n")}\n\nQuestion: ${question}`
+        : question,
+    },
+  ]);
 
   const msgId = uuid();
   await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'user',?3,NULL,?4)")

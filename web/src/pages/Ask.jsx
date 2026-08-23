@@ -93,8 +93,8 @@ export default function Ask() {
                   <AskGlyph />
                 </span>
                 <div className="text-center">
-                  <h2 className="text-lg font-semibold">Ask your notes</h2>
-                  <p className="text-zinc-500 text-[13px] mt-1">Answers grounded in your captures, with sources.</p>
+                  <h2 className="text-lg font-semibold">Ask anything</h2>
+                  <p className="text-zinc-500 text-[13px] mt-1">Grounded in your notes when they match — general knowledge otherwise.</p>
                 </div>
                 <div className="flex flex-wrap justify-center gap-2">
                   {starters.map((st) => (
@@ -149,7 +149,7 @@ export default function Ask() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
-                placeholder="Ask anything from your notes…"
+                placeholder="Ask anything…"
                 className="flex-1 card !bg-[#101013] px-4 py-3 text-[13.5px]"
               />
               <button onClick={send} disabled={busy || !input.trim()} className="btn btn-primary !px-4 shrink-0">
