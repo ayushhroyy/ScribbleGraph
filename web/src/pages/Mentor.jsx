@@ -145,7 +145,9 @@ export default function Mentor() {
   const armedRef = useRef(false);       // wake word heard, awaiting question
   const bypassRef = useRef(false);      // next utterance skips wake gate (manual)
   const busyRef = useRef(false);        // thinking/speaking
-  const audioRef = useRef(null);
+  const audioRef = useRef(null);        // HTMLAudio fallback
+  const audioCtxRef = useRef(null);     // unlocked WebAudio context
+  const ttsSrcRef = useRef(null);       // playing TTS source node
   const endRef = useRef(null);
 
   const [armedUI, setArmedUI] = useState(false);
@@ -187,28 +189,108 @@ export default function Mentor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, voiceOn, handsFree]);
 
+  /* ---- audio playback: WebAudio (unlocked on the Start-call tap) with
+          HTMLAudio fallback — plain <audio>.play() silently fails ~half the
+          time on mobile without a gesture-locked context ---- */
+
+  function unlockAudio() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
+        const ctx = new Ctx();
+        // silent blip inside the user gesture unlocks output on iOS/Android
+        const b = ctx.createBuffer(1, 1, 22050);
+        const s = ctx.createBufferSource();
+        s.buffer = b;
+        s.connect(ctx.destination);
+        s.start(0);
+        audioCtxRef.current = ctx;
+      }
+      audioCtxRef.current.resume?.().catch(() => {});
+      return audioCtxRef.current;
+    } catch {
+      return null;
+    }
+  }
+
+  function stopTTS() {
+    try { ttsSrcRef.current?.stop(); } catch {}
+    ttsSrcRef.current = null;
+    audioRef.current?.pause();
+  }
+
+  async function fetchTTS(text) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch("/api/mentor/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (res.ok) return await res.blob();
+        lastErr = new Error(`tts ${res.status}`);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr ?? new Error("tts failed");
+  }
+
+  function playBlob(blob) {
+    return new Promise(async (resolve) => {
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
+
+      // path 1: WebAudio (most reliable once unlocked)
+      try {
+        const ctx = unlockAudio();
+        if (ctx) {
+          const arr = await blob.arrayBuffer();
+          const audio = await ctx.decodeAudioData(arr.slice(0));
+          stopTTS();
+          const src = ctx.createBufferSource();
+          src.buffer = audio;
+          src.connect(ctx.destination);
+          src.onended = done;
+          ttsSrcRef.current = src;
+          src.start();
+          setTimeout(done, (audio.duration + 3) * 1000); // safety net
+          return;
+        }
+      } catch {}
+
+      // path 2: HTMLAudio fallback
+      try {
+        const url = URL.createObjectURL(blob);
+        const a = new Audio(url);
+        audioRef.current = a;
+        a.onended = () => { URL.revokeObjectURL(url); done(); };
+        a.onerror = () => { URL.revokeObjectURL(url); done(); };
+        a.play().catch(() => { URL.revokeObjectURL(url); done(); });
+        setTimeout(done, 120_000);
+      } catch {
+        done();
+      }
+    });
+  }
+
   async function speak(answerText) {
     if (!voiceOn) return;
+    setPhase(SPEAKING);
+    // pause the mic while we talk so recognition doesn't hear the answer
+    try { recogRef.current?.stop(); } catch {}
+    recogRef.current = null;
     try {
-      setPhase(SPEAKING);
-      const res = await fetch("/api/mentor/speak", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: answerText }),
-      });
-      if (!res.ok) throw new Error("tts");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      audioRef.current?.pause();
-      const a = new Audio(url);
-      audioRef.current = a;
-      await new Promise((resolve) => {
-        a.onended = resolve;
-        a.onerror = resolve;
-        a.play().catch(resolve);
-      });
-      URL.revokeObjectURL(url);
-    } catch {}
+      const blob = await fetchTTS(answerText);
+      await playBlob(blob);
+    } catch {
+      setError("Voice failed — showing the answer instead.");
+      setTimeout(() => setError(null), 4000);
+    } finally {
+      stopTTS();
+    }
     setPhase(wakeRef.current ? HOT : IDLE);
   }
 
@@ -351,6 +433,7 @@ export default function Mentor() {
   /* ---------------- call controls ---------------- */
 
   function startCall() {
+    unlockAudio(); // inside the user gesture — unlocks TTS output for the call
     setCallLive(true);
     setCallSecs(0);
     setMessages([]);
@@ -365,7 +448,7 @@ export default function Mentor() {
     stopSR();
     engineRef.current?.stop();
     engineRef.current = null;
-    audioRef.current?.pause();
+    stopTTS();
     bypassRef.current = false;
     armedRef.current = false;
     setArmedUI(false);
