@@ -50,7 +50,7 @@ export default function Ask() {
     try {
       const res = await api("/api/chat", { method: "POST", body: { chatId, question: q } });
       setChatId(res.chatId);
-      setMessages((m) => [...m, { role: "assistant", content: res.answer }, { role: "sources", sources: res.sources }]);
+      setMessages((m) => [...m, { role: "assistant", content: res.answer, mode: res.mode }, { role: "sources", sources: res.sources, mode: res.mode }]);
     } catch {
       setMessages((m) => [...m, { role: "assistant", content: "Something went wrong — check that your notes are processed, then try again.", error: true }]);
     } finally {
@@ -113,7 +113,14 @@ export default function Ask() {
             <div className="max-w-2xl mx-auto space-y-4">
               {messages.map((m, i) =>
                 m.role === "sources" ? (
-                  <SourceChips key={i} sources={m.sources} />
+                  m.sources?.length ? <SourceChips key={i} sources={m.sources} />
+                  : m.mode === "general" ? (
+                    <div key={i} className="flex fade-up">
+                      <span className="pill !text-[10.5px] text-zinc-400">
+                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-500" /> general knowledge — not from your notes
+                      </span>
+                    </div>
+                  ) : null
                 ) : (
                   <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} fade-up`}>
                     <div

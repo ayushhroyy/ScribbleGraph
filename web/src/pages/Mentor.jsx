@@ -174,7 +174,7 @@ export default function Mentor() {
     try {
       const res = await api("/api/chat", { method: "POST", body: { chatId, question } });
       setChatId(res.chatId);
-      setMessages((m) => [...m, { role: "assistant", content: res.answer, sources: res.sources }]);
+      setMessages((m) => [...m, { role: "assistant", content: res.answer, sources: res.sources, mode: res.mode }]);
       await speak(res.answer);
     } catch {
       setMessages((m) => [...m, { role: "assistant", content: "Sorry — something broke on that one. Try again.", error: true }]);
@@ -442,7 +442,7 @@ export default function Mentor() {
                         <div className={`card rounded-bl-md px-4 py-3 text-[13.5px] leading-relaxed whitespace-pre-wrap ${m.error ? "!border-[#f87171]/25 text-[#fca5a5]" : ""}`}>
                           {m.content}
                         </div>
-                        {m.sources?.length > 0 && (
+                        {m.sources?.length > 0 ? (
                           <div className="flex flex-wrap gap-1.5">
                             {m.sources.map((s, k) => (
                               <span key={k} className="pill !text-[10.5px] text-zinc-300">
@@ -450,7 +450,11 @@ export default function Mentor() {
                               </span>
                             ))}
                           </div>
-                        )}
+                        ) : m.mode === "general" ? (
+                          <span className="pill !text-[10px] text-zinc-500">
+                            <span className="w-1.5 h-1.5 rounded-full bg-zinc-600" /> general knowledge — not from your notes
+                          </span>
+                        ) : null}
                       </div>
                     )
                   )}

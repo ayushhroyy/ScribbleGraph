@@ -225,6 +225,28 @@ app.post("/api/chat", async (c) => {
       .run();
   }
 
+  const save = async (answer: string, sources: unknown[], mode: string) => {
+    await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'user',?3,NULL,?4)")
+      .bind(uuid(), id, question, Date.now())
+      .run();
+    await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'assistant',?3,?4,?5)")
+      .bind(uuid(), id, answer, JSON.stringify(sources), Date.now() + 1)
+      .run();
+    return c.json({ chatId: id, answer, sources, mode });
+  };
+
+  // small-talk fast path: greetings/thanks/bye → instant reply, zero API calls
+  const small = question.trim().toLowerCase().replace(/[^a-z\s]/g, "").trim();
+  if (/^(hi+|h+e+y+|h+l+o+|hello+|yo+|sup|hola|namaste|hii+|heyy+|good (morning|afternoon|evening))\s*(there|scribble|buddy|pal)?$/.test(small)) {
+    return save(
+      "Hey! I'm Scribble. Ask me anything — I'll use your notes when they're relevant, and general knowledge otherwise. Try \"explain Fourier transforms\" or \"quiz me on acids and bases\".",
+      [], "greeting"
+    );
+  }
+  if (/^(thanks|thank you|ty|thx|bye|goodbye|good night|gn)(\s+(scribble|buddy|pal))?$/.test(small)) {
+    return save("Anytime! Ping me whenever you want to study. 📚", [], "greeting");
+  }
+
   const [qvec] = await embed(c.env, [question]);
   const matches = await queryVectors(c.env, qvec, 8);
   // mistral-embed baseline similarity is ~0.72 for unrelated text — only
@@ -269,7 +291,7 @@ app.post("/api/chat", async (c) => {
       role: "system",
       content: identity + " " + (picked.length
         ? "The user's notes below are your primary source — use them and cite inline like (Source title, Page N). You may supplement with general knowledge when the notes are incomplete; keep note-based claims cited and extra context clearly yours."
-        : "The user's notes don't cover this topic, so answer from general knowledge. Be clear and helpful; you may suggest capturing notes on the topic to get grounded answers next time."),
+        : "The user's notes don't cover this topic, so answer from general knowledge as a great study mentor: clear, structured, example-driven. If it's worth saving, suggest capturing notes on it so future answers can cite their own pages."),
     },
     {
       role: "user",
@@ -279,15 +301,7 @@ app.post("/api/chat", async (c) => {
     },
   ]);
 
-  const msgId = uuid();
-  await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'user',?3,NULL,?4)")
-    .bind(uuid(), id, question, Date.now())
-    .run();
-  await c.env.DB.prepare("INSERT INTO messages (id, chat_id, role, content, sources_json, created_at) VALUES (?1,?2,'assistant',?3,?4,?5)")
-    .bind(msgId, id, answer, JSON.stringify(sources), Date.now() + 1)
-    .run();
-
-  return c.json({ chatId: id, answer, sources });
+  return save(answer, sources, picked.length ? "notes" : "general");
 });
 
 /* ---------- mentor (voice) ---------- */
